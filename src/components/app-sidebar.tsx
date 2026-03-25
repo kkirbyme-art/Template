@@ -1,20 +1,11 @@
 import {
-    AudioWaveform,
-    BookOpen,
-    Bot,
-    Command,
-    Frame,
-    GalleryVerticalEnd,
-    Map,
-    PieChart,
-    Settings2,
-    SquareTerminal,
-} from "lucide-react"
+    IconSettings as Settings2,
+    IconTerminal2 as SquareTerminal,
+} from "@tabler/icons-react"
 
 import { NavMain } from "@/components/nav-main"
-import { NavProjects } from "@/components/nav-projects"
 import { NavUser } from "@/components/nav-user"
-import { TeamSwitcher } from "@/components/team-switcher"
+import { SidebarLogo } from "@/components/sidebar-logo"
 import {
     Sidebar,
     SidebarContent,
@@ -24,94 +15,47 @@ import {
 } from "@/components/ui/sidebar"
 import { useAuth } from "@/lib/auth"
 
-const data = {
-    teams: [
+export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+    const { user } = useAuth()
+
+    const navMain = [
         {
-            name: "Acme Inc",
-            logo: GalleryVerticalEnd,
-            plan: "Enterprise",
-        },
-        {
-            name: "Acme Corp.",
-            logo: AudioWaveform,
-            plan: "Startup",
-        },
-        {
-            name: "Evil Corp.",
-            logo: Command,
-            plan: "Free",
-        },
-    ],
-    navMain: [
-        {
-            title: "Playground",
-            url: "#",
+            title: "Dashboard",
+            url: "/",
             icon: SquareTerminal,
             isActive: true,
-            items: [
-                { title: "History", url: "#" },
-                { title: "Starred", url: "#" },
-                { title: "Settings", url: "#" },
-            ],
-        },
-        {
-            title: "Models",
-            url: "#",
-            icon: Bot,
-            items: [
-                { title: "Genesis", url: "#" },
-                { title: "Explorer", url: "#" },
-                { title: "Quantum", url: "#" },
-            ],
-        },
-        {
-            title: "Documentation",
-            url: "#",
-            icon: BookOpen,
-            items: [
-                { title: "Introduction", url: "#" },
-                { title: "Get Started", url: "#" },
-                { title: "Tutorials", url: "#" },
-                { title: "Changelog", url: "#" },
-            ],
         },
         {
             title: "Settings",
             url: "#",
             icon: Settings2,
             items: [
-                { title: "General", url: "#" },
-                { title: "Team", url: "#" },
-                { title: "Billing", url: "#" },
-                { title: "Limits", url: "#" },
+                ...(user?.user_level === 696969
+                    ? [{ title: "General", url: "/settings/general" }]
+                    : []),
             ],
         },
-    ],
-    projects: [
-        { name: "Design Engineering", url: "#", icon: Frame },
-        { name: "Sales & Marketing", url: "#", icon: PieChart },
-        { name: "Travel", url: "#", icon: Map },
-    ],
-}
+    ]
 
-export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
-    const { user } = useAuth()
+    // Only show Settings if it has sub-items
+    const filteredNav = navMain.filter(
+        (item) => !item.items || item.items.length > 0
+    )
 
     return (
         <Sidebar collapsible="icon" {...props}>
-            <SidebarHeader>
-                <TeamSwitcher teams={data.teams} />
+            <SidebarHeader className="bg-primary/10 border-b border-primary/20">
+                <SidebarLogo />
             </SidebarHeader>
             <SidebarContent>
-                <NavMain items={data.navMain} />
-                <NavProjects projects={data.projects} />
+                <NavMain items={filteredNav} />
             </SidebarContent>
             <SidebarFooter>
                 <NavUser
                     user={{
-                        name: user?.fullname ?? "User",
-                        email: user?.user ?? "",
-                        avatar: "",
+                        name: user?.fullName ?? "User",
+                        email: user?.email ?? "",
+                        avatar: user ? `https://pgas.ph/hris/Content/images/photos/${user.eid}.png` : "",
                     }}
                 />
             </SidebarFooter>

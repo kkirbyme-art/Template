@@ -1,10 +1,10 @@
 import {
-    Folder,
-    Forward,
-    MoreHorizontal,
-    Trash2,
-    type LucideIcon,
-} from "lucide-react"
+    IconFolder as Folder,
+    IconShare as Forward,
+    IconDots as MoreHorizontal,
+    IconTrash as Trash2,
+    type Icon as TablerIcon,
+} from "@tabler/icons-react"
 
 import {
     DropdownMenu,
@@ -29,7 +29,7 @@ export function NavProjects({
     projects: {
         name: string
         url: string
-        icon: LucideIcon
+        icon: TablerIcon
     }[]
 }) {
     const { isMobile } = useSidebar()
@@ -40,14 +40,12 @@ export function NavProjects({
             <SidebarMenu>
                 {projects.map((item) => (
                     <SidebarMenuItem key={item.name}>
-                        <SidebarMenuButton asChild>
-                            <a href={item.url}>
-                                <item.icon />
-                                <span>{item.name}</span>
-                            </a>
+                        <SidebarMenuButton render={<a href={item.url} />}>
+                            <item.icon />
+                            <span>{item.name}</span>
                         </SidebarMenuButton>
                         <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
+                            <DropdownMenuTrigger>
                                 <SidebarMenuAction showOnHover>
                                     <MoreHorizontal />
                                     <span className="sr-only">More</span>

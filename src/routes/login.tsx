@@ -6,13 +6,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 
-const CREDENTIALS = {
-    user: "reykirbylumanta@gmail.com",
-    password: "123",
-    id: 69,
-    fullname: "Rey Kirby Lumanta",
-}
-
 export const Route = createFileRoute("/login")({
     component: LoginPage,
 })
@@ -23,20 +16,20 @@ function LoginPage() {
     const [email, setEmail] = useState("")
     const [password, setPassword] = useState("")
     const [error, setError] = useState<string | null>(null)
+    const [loading, setLoading] = useState(false)
 
-    function onSubmit(e: React.FormEvent) {
+    async function onSubmit(e: React.FormEvent) {
         e.preventDefault()
         setError(null)
+        setLoading(true)
 
-        if (email === CREDENTIALS.user && password === CREDENTIALS.password) {
-            login({
-                id: CREDENTIALS.id,
-                user: CREDENTIALS.user,
-                fullname: CREDENTIALS.fullname,
-            })
+        try {
+            await login(email, password)
             navigate({ to: "/" })
-        } else {
-            setError("Invalid email or password")
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Invalid email or password")
+        } finally {
+            setLoading(false)
         }
     }
 
@@ -54,11 +47,11 @@ function LoginPage() {
                         <form onSubmit={onSubmit}>
                             <div className="flex flex-col gap-6">
                                 <div className="grid gap-2">
-                                    <Label htmlFor="email">Email</Label>
+                                    <Label htmlFor="username">Username</Label>
                                     <Input
-                                        id="email"
-                                        type="email"
-                                        placeholder="m@example.com"
+                                        id="username"
+                                        type="text"
+                                        placeholder="Enter username"
                                         value={email}
                                         onChange={(e) => setEmail(e.target.value)}
                                         required
@@ -77,12 +70,9 @@ function LoginPage() {
                                 {error && (
                                     <p className="text-sm text-destructive">{error}</p>
                                 )}
-                                <Button type="submit" className="w-full">
-                                    Login
+                                <Button type="submit" className="w-full" disabled={loading}>
+                                    {loading ? "Signing in..." : "Login"}
                                 </Button>
-                            </div>
-                            <div className="mt-4 text-center text-sm text-muted-foreground">
-                                Use: reykirbylumanta@gmail.com / 123
                             </div>
                         </form>
                     </CardContent>
