@@ -171,5 +171,80 @@ namespace DigitalSignature.Controllers
 
             return Ok(new { success = true });
         }
+
+        [HttpGet("alternate_document_types/{alterId:int}")]
+        public async Task<IActionResult> GetAlternateDocumentTypes(int alterId)
+        {
+            var me = GetCurrentUser();
+            if (me is null) return Unauthorized();
+
+            var owned = await _dbService.ExecuteScalarAsync<int, dynamic>(
+                @"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories
+                  WHERE id = @AlterId AND user_eid = @Eid AND user_type = @UserType",
+                new { AlterId = alterId, me.Value.Eid, me.Value.UserType },
+                CommandType.Text);
+            if (owned == 0) return NotFound();
+
+            var results = await _dbService.QueryAsync<AlternateDocumentTypeDto, dynamic>(
+                @"SELECT
+                      asd.id AS Id,
+                      asd.doc_type_id AS DocTypeId,
+                      dt.document_description AS DocumentDescription,
+                      dt.document_abbr AS DocumentAbbr
+                  FROM bacpdfsign.dbo.alternate_signatories_documents asd
+                  INNER JOIN bacpdfsign.dbo.document_types dt ON dt.id = asd.doc_type_id
+                  WHERE asd.alter_id = @AlterId
+                  ORDER BY dt.document_description",
+                new { AlterId = alterId },
+                CommandType.Text);
+
+            return Ok(results);
+        }
+
+        [HttpPost("add_document_type")]
+        public async Task<IActionResult> AddDocumentType([FromBody] AddAlternateDocumentTypeRequest request)
+        {
+            var me = GetCurrentUser();
+            if (me is null) return Unauthorized();
+
+            var owned = await _dbService.ExecuteScalarAsync<int, dynamic>(
+                @"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories
+                  WHERE id = @AlterId AND user_eid = @Eid AND user_type = @UserType",
+                new { request.AlterId, me.Value.Eid, me.Value.UserType },
+                CommandType.Text);
+            if (owned == 0) return NotFound(new { success = false, message = "Alternate not found." });
+
+            var already = await _dbService.ExecuteScalarAsync<int, dynamic>(
+                @"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories_documents
+                  WHERE alter_id = @AlterId AND doc_type_id = @DocTypeId",
+                new { request.AlterId, request.DocTypeId },
+                CommandType.Text);
+            if (already > 0) return Ok(new { success = true }); // idempotent add
+
+            await _dbService.ExecuteAsync(
+                @"INSERT INTO bacpdfsign.dbo.alternate_signatories_documents (alter_id, doc_type_id, datentime)
+                  VALUES (@AlterId, @DocTypeId, GETDATE())",
+                new { request.AlterId, request.DocTypeId },
+                CommandType.Text);
+
+            return Ok(new { success = true });
+        }
+
+        [HttpDelete("delete_document_type/{id:int}")]
+        public async Task<IActionResult> DeleteDocumentType(int id)
+        {
+            var me = GetCurrentUser();
+            if (me is null) return Unauthorized();
+
+            var affected = await _dbService.ExecuteAsync(
+                @"DELETE asd FROM bacpdfsign.dbo.alternate_signatories_documents asd
+                  INNER JOIN bacpdfsign.dbo.alternate_signatories a ON a.id = asd.alter_id
+                  WHERE asd.id = @Id AND a.user_eid = @Eid AND a.user_type = @UserType",
+                new { Id = id, me.Value.Eid, me.Value.UserType },
+                CommandType.Text);
+
+            if (affected == 0) return NotFound(new { success = false, message = "Document type assignment not found." });
+            return Ok(new { success = true });
+        }
     }
 }
