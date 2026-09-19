@@ -246,5 +246,95 @@ namespace DigitalSignature.Controllers
             if (affected == 0) return NotFound(new { success = false, message = "Document type assignment not found." });
             return Ok(new { success = true });
         }
+
+        [HttpGet("my_principals")]
+        public async Task<IActionResult> GetMyPrincipals()
+        {
+            var me = GetCurrentUser();
+            if (me is null) return Unauthorized();
+
+            var results = await _dbService.QueryAsync<AlternatePrincipalDto, dynamic>(
+                @"SELECT
+                      a.user_eid AS PrincipalEid,
+                      a.user_type AS PrincipalUserType,
+                      sn.fname AS PrincipalName,
+                      sn.office_name AS PrincipalOffice
+                  FROM bacpdfsign.dbo.alternate_signatories a
+                  LEFT JOIN bacpdfsign.dbo.signatory_names sn
+                      ON sn.eid = a.user_eid AND sn.user_type = a.user_type
+                  WHERE a.user_alternate_eid = @Eid AND a.user_alternate_type = @UserType
+                    AND a.isactive = 1
+                    AND (a.is_permanent = 1 OR (GETDATE() BETWEEN a.dateFrom AND a.dateTo))
+                  ORDER BY sn.fname",
+                new { me.Value.Eid, me.Value.UserType },
+                CommandType.Text);
+
+            return Ok(results);
+        }
+
+        // Shared predicate for "is the caller currently an active alternate for
+        // this principal" — used by both endpoints below so their authorization
+        // check can never drift from what my_principals lists.
+        private async Task<bool> IsActiveAlternateForAsync(int principalEid, int principalUserType, int alternateEid, int alternateUserType)
+        {
+            var count = await _dbService.ExecuteScalarAsync<int, dynamic>(
+                @"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories
+                  WHERE user_eid = @PrincipalEid AND user_type = @PrincipalUserType
+                    AND user_alternate_eid = @AlternateEid AND user_alternate_type = @AlternateUserType
+                    AND isactive = 1
+                    AND (is_permanent = 1 OR (GETDATE() BETWEEN dateFrom AND dateTo))",
+                new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType },
+                CommandType.Text);
+            return count > 0;
+        }
+
+        private async Task<List<int>> GetAllowedDocTypeIdsAsync(int principalEid, int principalUserType, int alternateEid, int alternateUserType)
+        {
+            var ids = await _dbService.QueryAsync<int, dynamic>(
+                @"SELECT asd.doc_type_id
+                  FROM bacpdfsign.dbo.alternate_signatories_documents asd
+                  INNER JOIN bacpdfsign.dbo.alternate_signatories a ON a.id = asd.alter_id
+                  WHERE a.user_eid = @PrincipalEid AND a.user_type = @PrincipalUserType
+                    AND a.user_alternate_eid = @AlternateEid AND a.user_alternate_type = @AlternateUserType",
+                new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType },
+                CommandType.Text);
+            return ids.ToList();
+        }
+
+        [HttpGet("pending_document_types_as_alternate")]
+        public async Task<IActionResult> GetPendingDocumentTypesAsAlternate(
+            [FromQuery] int year, [FromQuery] int principalEid, [FromQuery] int principalUserType)
+        {
+            var me = GetCurrentUser();
+            if (me is null) return Unauthorized();
+
+            if (!await IsActiveAlternateForAsync(principalEid, principalUserType, me.Value.Eid, me.Value.UserType))
+                return Forbid();
+
+            var allowedDocTypeIds = await GetAllowedDocTypeIdsAsync(principalEid, principalUserType, me.Value.Eid, me.Value.UserType);
+            if (allowedDocTypeIds.Count == 0) return Ok(new List<PendingDocumentTypeDto>());
+
+            var results = await _signingService.GetPendingDocumentTypesAsync(year, principalEid, principalUserType, allowedDocTypeIds);
+            return Ok(results);
+        }
+
+        [HttpGet("pending_documents_as_alternate")]
+        public async Task<IActionResult> GetPendingDocumentsAsAlternate(
+            [FromQuery] int year, [FromQuery] int principalEid, [FromQuery] int principalUserType, [FromQuery] int? docTypeId = null)
+        {
+            var me = GetCurrentUser();
+            if (me is null) return Unauthorized();
+
+            if (!await IsActiveAlternateForAsync(principalEid, principalUserType, me.Value.Eid, me.Value.UserType))
+                return Forbid();
+
+            var allowedDocTypeIds = await GetAllowedDocTypeIdsAsync(principalEid, principalUserType, me.Value.Eid, me.Value.UserType);
+            if (docTypeId.HasValue && !allowedDocTypeIds.Contains(docTypeId.Value))
+                return Forbid();
+
+            var all = await _signingService.GetPendingDocumentsAsync(year, principalEid, principalUserType, docTypeId);
+            var filtered = all.Where(d => allowedDocTypeIds.Contains(d.DocTypeId)).ToList();
+            return Ok(filtered);
+        }
     }
 }
