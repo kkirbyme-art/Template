@@ -21,25 +21,24 @@ their own queue — this is purely self-service, not admin-managed.
 | `is_permanent` | bit — if 1, ignore date range |
 | `dateFrom` / `dateTo` | validity window when not permanent |
 
-`bacpdfsign.dbo.alternate_signatories_documents` — **does not exist yet**,
-needs to be created (given to the user to run, per this project's read-only
-SQL convention — see memory `feedback_sql_readonly`):
+`bacpdfsign.dbo.alternate_signatories_documents` **also already exists**,
+with old/existing data we can build on:
 
-```sql
-CREATE TABLE [bacpdfsign].[dbo].[alternate_signatories_documents] (
-    [id] INT IDENTITY(1,1) PRIMARY KEY,
-    [alter_id] INT NOT NULL,
-    [doc_type_id] INT NOT NULL,
-    [datentime] DATETIME NOT NULL DEFAULT GETDATE(),
-    [is_alt_des_id] INT NULL,
-    CONSTRAINT FK_alt_sig_docs_alternate
-        FOREIGN KEY (alter_id) REFERENCES [bacpdfsign].[dbo].[alternate_signatories](id)
-        ON DELETE CASCADE
-);
-```
+| column | meaning |
+|---|---|
+| `id` | PK |
+| `alter_id` | FK → `alternate_signatories.id` |
+| `doc_type_id` | FK → `document_types.id` |
+| `datentime` | when the doc type was assigned |
+| `is_alt_des_id` | existing column, purpose to be confirmed against real rows during implementation — treated as an internal/backend-set field, not surfaced in the UI |
 
-A hard delete of an `alternate_signatories` row cascades to its document-type
-rows.
+Both tables predate this feature and already hold data — no schema changes
+needed. Since no FK constraint is assumed to exist between the two tables,
+"deleting an alternate cascades its document-type rows" (per the
+add/edit/delete requirements) is enforced in application code: the
+`delete_alternate` endpoint deletes matching `alternate_signatories_documents`
+rows for that `alter_id` before deleting the `alternate_signatories` row
+itself, inside one transaction.
 
 ## Backend
 
