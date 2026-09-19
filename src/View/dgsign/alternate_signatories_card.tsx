@@ -97,11 +97,13 @@ export default function AlternateSignatoriesCard() {
             <Plus className="h-3.5 w-3.5" />
             Add Alternate
           </DialogTrigger>
-          <AddEditAlternateDialog
-            editing={null}
-            onClose={() => setAddOpen(false)}
-            onSaved={() => { setAddOpen(false); loadAlternates() }}
-          />
+          {addOpen && (
+            <AddEditAlternateDialog
+              editing={null}
+              onClose={() => setAddOpen(false)}
+              onSaved={() => { setAddOpen(false); loadAlternates() }}
+            />
+          )}
         </Dialog>
       </CardHeader>
       <CardContent>
@@ -236,7 +238,7 @@ function AddEditAlternateDialog({
     if (!item) { setPickedEmployee(null); return }
     setPickedEmployee({
       eid: Number(item.additional_id ?? 0),
-      userType: Number((item as Record<string, unknown>)['additional_Id_two'] ?? 0),
+      userType: Number(item['additional_Id_two'] ?? 0),
       name: item.value,
     })
   }
@@ -287,7 +289,7 @@ function AddEditAlternateDialog({
         <DialogTitle>{editing ? 'Edit Alternate' : 'Add Alternate'}</DialogTitle>
         <DialogDescription>
           {editing
-            ? `Change the validity window for ${editing.alternateName}.`
+            ? `Change the validity window for ${editing.alternateName ?? ''}.`
             : 'Pick an employee to authorize as your alternate signatory.'}
         </DialogDescription>
       </DialogHeader>
@@ -381,7 +383,7 @@ function DeleteAlternateDialog({
           <DialogTitle>Remove Alternate</DialogTitle>
           <DialogDescription>
             {target
-              ? `This permanently removes ${target.alternateName} as your alternate, along with the document types you granted them.`
+              ? `This permanently removes ${target.alternateName ?? ''} as your alternate, along with the document types you granted them.`
               : ''}
           </DialogDescription>
         </DialogHeader>
