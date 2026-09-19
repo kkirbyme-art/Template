@@ -27,6 +27,12 @@ namespace DigitalSignature.Controllers
             _logger = logger;
         }
 
+        // Single source of truth for "is this alternate_signatories row currently
+        // active" — used by both my_principals and IsActiveAlternateForAsync so
+        // they can never drift apart. Assumes the table is aliased "a".
+        private const string ActiveAlternateCondition =
+            "a.isactive = 1 AND (a.is_permanent = 1 OR (GETDATE() BETWEEN a.dateFrom AND a.dateTo))";
+
         // Caller's own identity from JWT claims — never trust a client-supplied
         // "owner" eid/userType for anything that reads or mutates someone's own
         // alternate list (mirrors DGSignController.MyCertificateRequests).
@@ -254,7 +260,7 @@ namespace DigitalSignature.Controllers
             if (me is null) return Unauthorized();
 
             var results = await _dbService.QueryAsync<AlternatePrincipalDto, dynamic>(
-                @"SELECT
+                $@"SELECT
                       a.user_eid AS PrincipalEid,
                       a.user_type AS PrincipalUserType,
                       sn.fname AS PrincipalName,
@@ -263,8 +269,7 @@ namespace DigitalSignature.Controllers
                   LEFT JOIN bacpdfsign.dbo.signatory_names sn
                       ON sn.eid = a.user_eid AND sn.user_type = a.user_type
                   WHERE a.user_alternate_eid = @Eid AND a.user_alternate_type = @UserType
-                    AND a.isactive = 1
-                    AND (a.is_permanent = 1 OR (GETDATE() BETWEEN a.dateFrom AND a.dateTo))
+                    AND {ActiveAlternateCondition}
                   ORDER BY sn.fname",
                 new { me.Value.Eid, me.Value.UserType },
                 CommandType.Text);
@@ -278,11 +283,10 @@ namespace DigitalSignature.Controllers
         private async Task<bool> IsActiveAlternateForAsync(int principalEid, int principalUserType, int alternateEid, int alternateUserType)
         {
             var count = await _dbService.ExecuteScalarAsync<int, dynamic>(
-                @"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories
-                  WHERE user_eid = @PrincipalEid AND user_type = @PrincipalUserType
-                    AND user_alternate_eid = @AlternateEid AND user_alternate_type = @AlternateUserType
-                    AND isactive = 1
-                    AND (is_permanent = 1 OR (GETDATE() BETWEEN dateFrom AND dateTo))",
+                $@"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories a
+                  WHERE a.user_eid = @PrincipalEid AND a.user_type = @PrincipalUserType
+                    AND a.user_alternate_eid = @AlternateEid AND a.user_alternate_type = @AlternateUserType
+                    AND {ActiveAlternateCondition}",
                 new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType },
                 CommandType.Text);
             return count > 0;
