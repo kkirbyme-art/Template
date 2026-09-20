@@ -922,6 +922,11 @@ public class SigningService : ISigningService
         var eidSignature = request.Eid;
         var eidUtSignature = request.UserType;
 
+        // Declared here (not inside the try below) so the outer catch can also
+        // roll it back — an exception from Spire/PDF work between opening this
+        // transaction and committing it must never leave it dangling open.
+        IDbTransaction? alternateTx = null;
+
         try
         {
             // 1. Get sig_id for the current signatory (non-alternate/delegate path)
@@ -974,13 +979,18 @@ public class SigningService : ISigningService
             if (docDetails == null)
                 return new SaveSignatureResult { Success = false, Message = "Document not found" };
 
-            // Re-validate, at the moment of signing, that the caller is
-            // CURRENTLY an active alternate for this principal and for this
-            // document's type — the frontend's queue listing already filters
-            // to this, but the mutation itself must never trust a
+            // Re-validate, at the moment of signing, that the (VwEids/VwUserType,
+            // Eid/UserType) PAIR is currently an active alternate relationship
+            // for this document's type — the frontend's queue listing already
+            // filters to this, but the mutation itself must never trust a
             // client-supplied isAlternate/vwEids/vwUserType without its own
-            // server-side check (mirrors PublicSignController's stance of
-            // never trusting these fields from an untrusted caller).
+            // server-side check. NOTE: this validates the relationship, not
+            // that the caller truly IS request.Eid — DGSignController does not
+            // bind Eid/UserType from the JWT before calling this service (unlike
+            // PublicSignController, which does), so a caller could in principle
+            // submit someone else's Eid. That gap is pre-existing and not
+            // specific to the alternate flow (the PIN/password check below is
+            // what actually gates signing as a given Eid); it isn't closed here.
             if (principalRow != null)
             {
                 var principalEidInt = int.TryParse(request.VwEids, out var pEid) ? pEid : (int?)null;
@@ -1334,7 +1344,6 @@ public class SigningService : ISigningService
             // gives the signing pass a real row of its own to attach
             // document_signature_location entries to, and lets the insert
             // roll back along with everything else below if anything fails.
-            IDbTransaction? alternateTx = null;
             var insertSigIdForLocation = signId;
             var closingSigId = signId;
 
@@ -1367,6 +1376,14 @@ public class SigningService : ISigningService
                         },
                         CommandType.Text,
                         alternateTx);
+
+                    // SCOPE_IDENTITY() returning NULL/0 (e.g. an INSTEAD OF
+                    // trigger on this table) must not silently proceed — that
+                    // would attach every signature-location row to sig_id 0
+                    // and still commit a "successful" sign with no recoverable
+                    // location record.
+                    if (newAlternateSigId <= 0)
+                        throw new InvalidOperationException("New alternate signatory row did not return a valid sig_id");
 
                     insertSigIdForLocation = newAlternateSigId.ToString();
                     closingSigId = request.IsDelegate != 0 ? signIdDelegate : signIdAlternate;
@@ -1478,9 +1495,41 @@ public class SigningService : ISigningService
 
             try
             {
-                var statusSql = @"UPDATE bacpdfsign.dbo.document_signatories SET sig_status = 1 WHERE sig_id = @SignId;
+                // closingSigId is the row being satisfied by this signature — the
+                // caller's own row for a normal signature, or the PRINCIPAL's
+                // original pending row (not the newly-inserted alternate row,
+                // which is already status = 1) when signing as an alternate.
+                if (alternateTx != null)
+                {
+                    // Guard against a double-submit/race on the alternate path:
+                    // only close the principal's row if it's still actually
+                    // pending. If a concurrent request already closed it, this
+                    // pass must not also leave behind the alternate row (and
+                    // its signature-location/PDF stamp) it already inserted —
+                    // roll back the whole transaction, including that insert.
+                    var closeAffected = await _dbService.ExecuteAsync<dynamic>(
+                        "UPDATE bacpdfsign.dbo.document_signatories SET sig_status = 1 WHERE sig_id = @SignId AND sig_status = 0",
+                        new { SignId = closingSigId },
+                        CommandType.Text,
+                        alternateTx);
 
-                      DECLARE @counter INT = (
+                    if (closeAffected == 0)
+                    {
+                        await _dbService.RollbackTransactionAsync(alternateTx);
+                        await LogError(eidSignature, eidUtSignature, request.DocId,
+                            "Principal's signatory row was no longer pending (concurrent signature already applied)");
+                        return new SaveSignatureResult { Success = false, Message = "This document is no longer pending your principal's signature." };
+                    }
+                }
+                else
+                {
+                    await _dbService.ExecuteAsync<dynamic>(
+                        "UPDATE bacpdfsign.dbo.document_signatories SET sig_status = 1 WHERE sig_id = @SignId",
+                        new { SignId = closingSigId },
+                        CommandType.Text);
+                }
+
+                var statusSql = @"DECLARE @counter INT = (
                           SELECT COUNT(*) FROM bacpdfsign.dbo.document_signatories
                           WHERE doc_id = @DocId AND sig_status = 0
                       );
@@ -1495,10 +1544,6 @@ public class SigningService : ISigningService
                       WHERE doc_id = @DocId AND sig_status = 0
                         AND sig_order > (SELECT sig_order FROM bacpdfsign.dbo.document_signatories WHERE sig_id = @SignId)
                       ORDER BY sig_order ASC;";
-                // closingSigId is the row being satisfied by this signature — the
-                // caller's own row for a normal signature, or the PRINCIPAL's
-                // original pending row (not the newly-inserted alternate row,
-                // which is already status = 1) when signing as an alternate.
                 var statusParams = new { SignId = closingSigId, DocId = request.DocId };
 
                 var statusResult = alternateTx != null
@@ -1619,6 +1664,14 @@ public class SigningService : ISigningService
         }
         catch (Exception ex)
         {
+            // An exception between opening alternateTx (step 8a) and its commit
+            // (step 9) can originate outside those steps' own try/catch blocks —
+            // e.g. Spire/PDF work in the signing loop — and must not leave the
+            // transaction dangling open.
+            if (alternateTx != null)
+            {
+                try { await _dbService.RollbackTransactionAsync(alternateTx); } catch { /* already rolled back or connection gone */ }
+            }
             _logger.LogError(ex, "Error saving signature image for doc: {DocId}, eid: {Eid}", request.DocId, request.Eid);
             return new SaveSignatureResult
             {
