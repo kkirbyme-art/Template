@@ -912,41 +912,52 @@ public class SigningService : ISigningService
 
     public async Task<SaveSignatureResult> SaveSignatureImageAsync(SaveSignatureRequest request)
     {
-        var eidSignature = "";
-        var eidUtSignature = "";
+        // The certificate, PIN/password, signature image, and stamped name always
+        // belong to the person who actually logged in and submitted this request —
+        // never the principal being signed for. This holds even in the
+        // alternate/delegate flow: an alternate authenticates and signs with
+        // their OWN credentials; only the workflow bookkeeping below (which
+        // pending row gets closed, and the new row recorded for the alternate)
+        // references the principal's identity (request.VwEids/VwUserType).
+        var eidSignature = request.Eid;
+        var eidUtSignature = request.UserType;
 
         try
         {
-            // Determine signature EID based on delegate/alternate flags
-            if (request.IsAlternate != 0 || request.IsDelegate != 0)
-            {
-                eidSignature = request.VwEids;
-                eidUtSignature = request.VwUserType;
-            }
-            else
-            {
-                eidSignature = request.Eid;
-                eidUtSignature = request.UserType;
-            }
-
-            // 1. Get sig_id for the current signatory
+            // 1. Get sig_id for the current signatory (non-alternate/delegate path)
             var signId = await GetSigId(request.DocId, request.Eid, request.UserType);
             var signIdAlternate = "";
             var signIdDelegate = "";
             var signFname = await GetSigFname(request.Eid, request.UserType);
             var isAltSpecimenAvailable = await GetAlterSpecimen(request.Eid, request.UserType);
 
+            // The principal's pending document_signatories row that this
+            // alternate/delegate action satisfies — populated only when
+            // IsAlternate is set. The alternate signs a brand-new row cloned
+            // from this one (inserted just before the signature-location loop
+            // below) rather than reusing it directly, so the signatories table
+            // always records who actually signed alongside the principal's
+            // now-closed row.
+            PrincipalSignatoryRowDto? principalRow = null;
+
             if (request.IsAlternate != 0)
             {
                 if (request.IsDelegate != 0)
                 {
                     signIdDelegate = await GetSigIdDesignated(request.DocId, request.Eid, request.UserType, request.VwEids, request.VwUserType);
-                    signFname = await GetSigFname(request.VwEids, request.VwUserType);
+                    principalRow = await GetSignatoryRowForClosureAsync(signIdDelegate);
                 }
                 else
                 {
                     signIdAlternate = await GetSigIdAlternate(request.DocId, request.Eid, request.UserType, request.VwEids, request.VwUserType);
-                    signFname = await GetSigFname(request.VwEids, request.VwUserType);
+                    principalRow = await GetSignatoryRowForClosureAsync(signIdAlternate);
+                }
+
+                if (principalRow == null)
+                {
+                    await LogError(eidSignature, eidUtSignature, request.DocId,
+                        "No pending signatory row found for the principal being signed for");
+                    return new SaveSignatureResult { Success = false, Message = "This document is no longer pending your principal's signature." };
                 }
             }
 
@@ -962,6 +973,30 @@ public class SigningService : ISigningService
 
             if (docDetails == null)
                 return new SaveSignatureResult { Success = false, Message = "Document not found" };
+
+            // Re-validate, at the moment of signing, that the caller is
+            // CURRENTLY an active alternate for this principal and for this
+            // document's type — the frontend's queue listing already filters
+            // to this, but the mutation itself must never trust a
+            // client-supplied isAlternate/vwEids/vwUserType without its own
+            // server-side check (mirrors PublicSignController's stance of
+            // never trusting these fields from an untrusted caller).
+            if (principalRow != null)
+            {
+                var principalEidInt = int.TryParse(request.VwEids, out var pEid) ? pEid : (int?)null;
+                var principalUserTypeInt = int.TryParse(request.VwUserType, out var pUt) ? pUt : (int?)null;
+                var alternateEidInt = int.TryParse(request.Eid, out var aEid) ? aEid : (int?)null;
+                var alternateUserTypeInt = int.TryParse(request.UserType, out var aUt) ? aUt : (int?)null;
+
+                if (principalEidInt is null || principalUserTypeInt is null || alternateEidInt is null || alternateUserTypeInt is null
+                    || !await IsActiveAlternateForSigningAsync(principalEidInt.Value, principalUserTypeInt.Value, alternateEidInt.Value, alternateUserTypeInt.Value)
+                    || !await IsDocTypeAllowedForAlternateAsync(principalEidInt.Value, principalUserTypeInt.Value, alternateEidInt.Value, alternateUserTypeInt.Value, docDetails.DocTypeId))
+                {
+                    await LogError(eidSignature, eidUtSignature, request.DocId,
+                        "Caller is not currently an authorized alternate for this principal/document type");
+                    return new SaveSignatureResult { Success = false, Message = "You are not currently authorized to sign this document as an alternate." };
+                }
+            }
 
             // 3. Resolve PDF path and read bytes while network connection is open
             var credentials = _credentialService.GetNetworkCredential();
@@ -1292,6 +1327,59 @@ public class SigningService : ISigningService
                 return new SaveSignatureResult { Success = false, Message = "Invalid certificate password" };
             }
 
+            // 8a. For an alternate/delegate signature, open a transaction and
+            // insert a brand-new document_signatories row cloned from the
+            // principal's pending row (same doc/order/level/etc.) but under
+            // the alternate's own identity and already marked signed. This
+            // gives the signing pass a real row of its own to attach
+            // document_signature_location entries to, and lets the insert
+            // roll back along with everything else below if anything fails.
+            IDbTransaction? alternateTx = null;
+            var insertSigIdForLocation = signId;
+            var closingSigId = signId;
+
+            if (principalRow != null)
+            {
+                alternateTx = await _dbService.BeginTransactionAsync();
+                try
+                {
+                    var newAlternateSigId = await _dbService.ExecuteScalarAsync<int, dynamic>(
+                        @"INSERT INTO bacpdfsign.dbo.document_signatories
+                            (doc_id, sig_code, sig_eid, sig_status, sig_order, sig_remarks,
+                             sig_query_signed, sig_query_return, sig_user_type, sig_level,
+                             sig_sign_count, sig_remarks_datenTime, date_time_inserted)
+                          VALUES
+                            (@DocId, @SigCode, @SigEid, 1, @SigOrder, '',
+                             @QuerySigned, @QueryReturn, @SigUserType, @SigLevel,
+                             @SigSignCount, '', CONVERT(NVARCHAR(50), GETDATE(), 100));
+                          SELECT SCOPE_IDENTITY();",
+                        new
+                        {
+                            principalRow.DocId,
+                            principalRow.SigCode,
+                            SigEid = request.Eid,
+                            principalRow.SigOrder,
+                            QuerySigned = (object?)principalRow.SigQuerySigned ?? DBNull.Value,
+                            QueryReturn = (object?)principalRow.SigQueryReturn ?? DBNull.Value,
+                            SigUserType = request.UserType,
+                            principalRow.SigLevel,
+                            principalRow.SigSignCount
+                        },
+                        CommandType.Text,
+                        alternateTx);
+
+                    insertSigIdForLocation = newAlternateSigId.ToString();
+                    closingSigId = request.IsDelegate != 0 ? signIdDelegate : signIdAlternate;
+                }
+                catch (Exception ec)
+                {
+                    await _dbService.RollbackTransactionAsync(alternateTx);
+                    await LogError(eidSignature, eidUtSignature, request.DocId,
+                        ec.Message + "---fail to insert alternate signatory row");
+                    return new SaveSignatureResult { Success = false, Message = "Something went wrong" };
+                }
+            }
+
             // 8. Apply each signature to the PDF and insert DB records
             foreach (var sigLoc in signatureLocations)
             {
@@ -1343,12 +1431,7 @@ public class SigningService : ISigningService
 
                 try
                 {
-                    var insertSigId = request.IsDelegate != 0 ? signIdDelegate
-                        : request.IsAlternate != 0 ? signIdAlternate
-                        : signId;
-
-                    await _dbService.ExecuteScalarAsync<int, dynamic>(
-                        @"INSERT INTO bacpdfsign.dbo.document_signature_location
+                    var locationSql = @"INSERT INTO bacpdfsign.dbo.document_signature_location
                             (sig_id, sign_device_name, sign_address, sign_latitude, sign_longitude, sign_accuracy,
                              sign_x, sign_y, sign_page, sign_type, sign_image, sign_datetime,
                              sign_passwod, sign_method, pfx_id, sign_is_alternate_signature)
@@ -1356,27 +1439,33 @@ public class SigningService : ISigningService
                             (@SigId, @DeviceType, @Address, @Latitude, @Longitude, @Accuracy,
                              @X, @Y, @Page, 1, '', GETDATE(),
                              @Password, @ModsId, @PfxId, @SpecimenType);
-                          SELECT SCOPE_IDENTITY();",
-                        new
-                        {
-                            SigId = insertSigId,
-                            DeviceType = request.DgDeviceType,
-                            Address = request.DgAddress,
-                            Latitude = request.DgLatitude,
-                            Longitude = request.DgLongitude,
-                            Accuracy = request.DgAccuracy,
-                            X = x,
-                            Y = y,
-                            Page = sigLoc.Page,
-                            Password = pfxDetails.Password ?? "",  // store encrypted, never cleartext
-                            ModsId = request.ModsId,
-                            PfxId = pfxDetails.PfxId,
-                            SpecimenType = sigLoc.SpecimenType
-                        },
-                        CommandType.Text);
+                          SELECT SCOPE_IDENTITY();";
+                    var locationParams = new
+                    {
+                        SigId = insertSigIdForLocation,
+                        DeviceType = request.DgDeviceType,
+                        Address = request.DgAddress,
+                        Latitude = request.DgLatitude,
+                        Longitude = request.DgLongitude,
+                        Accuracy = request.DgAccuracy,
+                        X = x,
+                        Y = y,
+                        Page = sigLoc.Page,
+                        Password = pfxDetails.Password ?? "",  // store encrypted, never cleartext
+                        ModsId = request.ModsId,
+                        PfxId = pfxDetails.PfxId,
+                        SpecimenType = sigLoc.SpecimenType
+                    };
+
+                    if (alternateTx != null)
+                        await _dbService.ExecuteScalarAsync<int, dynamic>(locationSql, locationParams, CommandType.Text, alternateTx);
+                    else
+                        await _dbService.ExecuteScalarAsync<int, dynamic>(locationSql, locationParams, CommandType.Text);
                 }
                 catch (Exception ec)
                 {
+                    if (alternateTx != null)
+                        await _dbService.RollbackTransactionAsync(alternateTx);
                     await LogError(eidSignature, eidUtSignature, request.DocId,
                         ec.Message + "---fail adding p12 to pdf, saving sign details");
                     return new SaveSignatureResult { Success = false, Message = "Something went wrong" };
@@ -1389,8 +1478,7 @@ public class SigningService : ISigningService
 
             try
             {
-                var statusResult = await _dbService.QueryFirstOrDefaultAsync<NextSignatoryDto, dynamic>(
-                    @"UPDATE bacpdfsign.dbo.document_signatories SET sig_status = 1 WHERE sig_id = @SignId;
+                var statusSql = @"UPDATE bacpdfsign.dbo.document_signatories SET sig_status = 1 WHERE sig_id = @SignId;
 
                       DECLARE @counter INT = (
                           SELECT COUNT(*) FROM bacpdfsign.dbo.document_signatories
@@ -1406,18 +1494,30 @@ public class SigningService : ISigningService
                       FROM bacpdfsign.dbo.document_signatories
                       WHERE doc_id = @DocId AND sig_status = 0
                         AND sig_order > (SELECT sig_order FROM bacpdfsign.dbo.document_signatories WHERE sig_id = @SignId)
-                      ORDER BY sig_order ASC;",
-                    new { SignId = signId, DocId = request.DocId },
-                    CommandType.Text);
+                      ORDER BY sig_order ASC;";
+                // closingSigId is the row being satisfied by this signature — the
+                // caller's own row for a normal signature, or the PRINCIPAL's
+                // original pending row (not the newly-inserted alternate row,
+                // which is already status = 1) when signing as an alternate.
+                var statusParams = new { SignId = closingSigId, DocId = request.DocId };
+
+                var statusResult = alternateTx != null
+                    ? await _dbService.QueryFirstOrDefaultAsync<NextSignatoryDto, dynamic>(statusSql, statusParams, CommandType.Text, alternateTx)
+                    : await _dbService.QueryFirstOrDefaultAsync<NextSignatoryDto, dynamic>(statusSql, statusParams, CommandType.Text);
 
                 if (statusResult != null)
                 {
                     nextSignatoryEid = statusResult.SigEid;
                     nextSignatoryUserType = statusResult.SigUserType;
                 }
+
+                if (alternateTx != null)
+                    await _dbService.CommitTransactionAsync(alternateTx);
             }
             catch (Exception ec)
             {
+                if (alternateTx != null)
+                    await _dbService.RollbackTransactionAsync(alternateTx);
                 await LogError(eidSignature, eidUtSignature, request.DocId,
                     ec.Message + "---fail to update signatory to signed");
                 return new SaveSignatureResult { Success = false, Message = "Something went wrong" };
@@ -1491,7 +1591,7 @@ public class SigningService : ISigningService
                     @"SELECT ISNULL(
                         (SELECT TOP 1 sig_query_signed FROM bacpdfsign.dbo.document_signatories WHERE sig_id = @SignId),
                         '')",
-                    new { SignId = signId },
+                    new { SignId = closingSigId },
                     CommandType.Text);
 
                 if (!string.IsNullOrEmpty(triggerQuery))
@@ -1714,6 +1814,62 @@ public class SigningService : ISigningService
               WHERE doc_id = @DocId AND sig_eid = @VwEids AND sig_user_type = @VwUserType AND sig_status = 0",
             new { DocId = docId, Eid = eid, UserType = userType, VwEids = vwEids, VwUserType = vwUserType },
             CommandType.Text) ?? "";
+    }
+
+    // Fetches the full row (not just the id) for the principal's pending
+    // document_signatories row an alternate/delegate signature is about to
+    // satisfy — used to clone it into a new row under the alternate's own
+    // identity in SaveSignatureImageAsync. Returns null for an empty/unknown
+    // sigId (e.g. GetSigIdAlternate/GetSigIdDesignated found no pending row).
+    private async Task<PrincipalSignatoryRowDto?> GetSignatoryRowForClosureAsync(string sigId)
+    {
+        if (string.IsNullOrEmpty(sigId)) return null;
+
+        return await _dbService.QueryFirstOrDefaultAsync<PrincipalSignatoryRowDto, dynamic>(
+            @"SELECT doc_id AS DocId, sig_code AS SigCode, sig_order AS SigOrder,
+                     ISNULL(sig_level, 0) AS SigLevel, ISNULL(sig_sign_count, 1) AS SigSignCount,
+                     sig_query_signed AS SigQuerySigned, sig_query_return AS SigQueryReturn
+              FROM bacpdfsign.dbo.document_signatories WHERE sig_id = @SigId",
+            new { SigId = sigId },
+            CommandType.Text);
+    }
+
+    // Re-checked at the moment of signing (not just when listing pending
+    // documents) so save_signature_image can never be tricked into signing
+    // "as an alternate" for a relationship that isn't currently active, no
+    // matter what a client sends in isAlternate/vwEids/vwUserType. Mirrors
+    // AlternateSignatoriesController.IsActiveAlternateForAsync's predicate —
+    // the two are intentionally duplicated across the CRUD layer and this
+    // enforcement layer rather than shared, since they serve different
+    // callers, but any change to the "what counts as active" rule must be
+    // applied to both.
+    private async Task<bool> IsActiveAlternateForSigningAsync(int principalEid, int principalUserType, int alternateEid, int alternateUserType)
+    {
+        var count = await _dbService.ExecuteScalarAsync<int, dynamic>(
+            @"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories
+              WHERE user_eid = @PrincipalEid AND user_type = @PrincipalUserType
+                AND user_alternate_eid = @AlternateEid AND user_alternate_type = @AlternateUserType
+                AND isactive = 1
+                AND (is_permanent = 1 OR (GETDATE() BETWEEN dateFrom AND dateTo))",
+            new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType },
+            CommandType.Text);
+        return count > 0;
+    }
+
+    private async Task<bool> IsDocTypeAllowedForAlternateAsync(int principalEid, int principalUserType, int alternateEid, int alternateUserType, long docTypeId)
+    {
+        var count = await _dbService.ExecuteScalarAsync<int, dynamic>(
+            @"SELECT COUNT(1)
+              FROM bacpdfsign.dbo.alternate_signatories_documents asd
+              INNER JOIN bacpdfsign.dbo.alternate_signatories a ON a.id = asd.alter_id
+              WHERE a.user_eid = @PrincipalEid AND a.user_type = @PrincipalUserType
+                AND a.user_alternate_eid = @AlternateEid AND a.user_alternate_type = @AlternateUserType
+                AND asd.doc_type_id = @DocTypeId
+                AND a.isactive = 1
+                AND (a.is_permanent = 1 OR (GETDATE() BETWEEN a.dateFrom AND a.dateTo))",
+            new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType, DocTypeId = docTypeId },
+            CommandType.Text);
+        return count > 0;
     }
 
     private async Task<string?> GetAlternateSignatureImage(string eidSignature, string eidUtSignature, long isAltAvailable)

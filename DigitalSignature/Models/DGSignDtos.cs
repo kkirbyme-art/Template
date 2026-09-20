@@ -741,6 +741,21 @@ namespace DigitalSignature.Models
         public int? DocPages { get; set; }               // only populated by callers that select it
     }
 
+    // The principal's pending document_signatories row an alternate/delegate
+    // signature is about to satisfy, fetched in full (not just its sig_id) so
+    // SigningService.SaveSignatureImageAsync can clone it into a new row under
+    // the alternate's own identity.
+    public class PrincipalSignatoryRowDto
+    {
+        public int DocId { get; set; }
+        public string? SigCode { get; set; }
+        public int SigOrder { get; set; }
+        public int SigLevel { get; set; }
+        public int SigSignCount { get; set; }
+        public string? SigQuerySigned { get; set; }
+        public string? SigQueryReturn { get; set; }
+    }
+
     // Lightweight projection used to lazily load just the blob columns of
     // document_attach, without pulling them into every DocumentAttachDetails query.
     public class DocumentAttachmentBlob

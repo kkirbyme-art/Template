@@ -295,11 +295,12 @@ namespace DigitalSignature.Controllers
         private async Task<List<int>> GetAllowedDocTypeIdsAsync(int principalEid, int principalUserType, int alternateEid, int alternateUserType)
         {
             var ids = await _dbService.QueryAsync<int, dynamic>(
-                @"SELECT asd.doc_type_id
+                $@"SELECT asd.doc_type_id
                   FROM bacpdfsign.dbo.alternate_signatories_documents asd
                   INNER JOIN bacpdfsign.dbo.alternate_signatories a ON a.id = asd.alter_id
                   WHERE a.user_eid = @PrincipalEid AND a.user_type = @PrincipalUserType
-                    AND a.user_alternate_eid = @AlternateEid AND a.user_alternate_type = @AlternateUserType",
+                    AND a.user_alternate_eid = @AlternateEid AND a.user_alternate_type = @AlternateUserType
+                    AND {ActiveAlternateCondition}",
                 new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType },
                 CommandType.Text);
             return ids.ToList();
