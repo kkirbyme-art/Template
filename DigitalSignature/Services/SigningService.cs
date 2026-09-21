@@ -1525,10 +1525,28 @@ public class SigningService : ISigningService
                 }
                 else
                 {
-                    await _dbService.ExecuteAsync<dynamic>(
-                        "UPDATE bacpdfsign.dbo.document_signatories SET sig_status = 1 WHERE sig_id = @SignId",
+                    // Symmetric guard with the alternate branch above: this row
+                    // may have already been closed by a concurrent alternate
+                    // signature on the same principal row (or a duplicate
+                    // submit of this same request). Without the sig_status = 0
+                    // filter and an affected-rows check, this UPDATE silently
+                    // no-ops while the method proceeds to step 10 and re-stamps
+                    // the PDF under the caller's own credentials — overwriting
+                    // whatever signature (e.g. the alternate's) was already
+                    // applied to the file on disk. This path has never been
+                    // transactional, so there is nothing to roll back here —
+                    // just stop before step 10 touches the file.
+                    var closeAffected = await _dbService.ExecuteAsync<dynamic>(
+                        "UPDATE bacpdfsign.dbo.document_signatories SET sig_status = 1 WHERE sig_id = @SignId AND sig_status = 0",
                         new { SignId = closingSigId },
                         CommandType.Text);
+
+                    if (closeAffected == 0)
+                    {
+                        await LogError(eidSignature, eidUtSignature, request.DocId,
+                            "Signatory row was no longer pending (concurrent signature already applied)");
+                        return new SaveSignatureResult { Success = false, Message = "This document is no longer pending your signature." };
+                    }
                 }
 
                 var statusSql = @"DECLARE @counter INT = (
@@ -1905,7 +1923,7 @@ public class SigningService : ISigningService
               WHERE user_eid = @PrincipalEid AND user_type = @PrincipalUserType
                 AND user_alternate_eid = @AlternateEid AND user_alternate_type = @AlternateUserType
                 AND isactive = 1
-                AND (is_permanent = 1 OR (GETDATE() BETWEEN dateFrom AND dateTo))",
+                AND (is_permanent = 1 OR (CAST(GETDATE() AS DATE) BETWEEN dateFrom AND dateTo))",
             new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType },
             CommandType.Text);
         return count > 0;
@@ -1921,7 +1939,7 @@ public class SigningService : ISigningService
                 AND a.user_alternate_eid = @AlternateEid AND a.user_alternate_type = @AlternateUserType
                 AND asd.doc_type_id = @DocTypeId
                 AND a.isactive = 1
-                AND (a.is_permanent = 1 OR (GETDATE() BETWEEN a.dateFrom AND a.dateTo))",
+                AND (a.is_permanent = 1 OR (CAST(GETDATE() AS DATE) BETWEEN a.dateFrom AND a.dateTo))",
             new { PrincipalEid = principalEid, PrincipalUserType = principalUserType, AlternateEid = alternateEid, AlternateUserType = alternateUserType, DocTypeId = docTypeId },
             CommandType.Text);
         return count > 0;
