@@ -9,13 +9,34 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SuperadminRouteImport } from './routes/superadmin'
+import { Route as RegisterRouteImport } from './routes/register'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as PublicSignRouteImport } from './routes/public/sign'
+import { Route as PublicForSignatureQueueRouteImport } from './routes/public/for-signature-queue'
 import { Route as AuthenticatedAccountRouteImport } from './routes/_authenticated/account'
-import { Route as AuthenticatedSettingsGeneralRouteImport } from './routes/_authenticated/settings/general'
+import { Route as AuthenticatedSignatureMySignatureRouteImport } from './routes/_authenticated/signature/MySignature'
+import { Route as AuthenticatedSignatureForSignatureAlternateRouteImport } from './routes/_authenticated/signature/ForSignatureAlternate'
+import { Route as AuthenticatedSignatureForSignatureRouteImport } from './routes/_authenticated/signature/ForSignature'
+import { Route as AuthenticatedDocumentsUploadedRouteImport } from './routes/_authenticated/documents/uploaded'
+import { Route as AuthenticatedDocumentsMydocumentRouteImport } from './routes/_authenticated/documents/mydocument'
+import { Route as AuthenticatedAdminDocumentSearchRouteImport } from './routes/_authenticated/admin/document-search'
+import { Route as AuthenticatedAdminCertificateRequestsRouteImport } from './routes/_authenticated/admin/certificate-requests'
+import { Route as AuthenticatedAdminActiveCertificatesRouteImport } from './routes/_authenticated/admin/active-certificates'
 import { Route as AuthenticatedAccountAccountRouteImport } from './routes/_authenticated/account/account'
 
+const SuperadminRoute = SuperadminRouteImport.update({
+  id: '/superadmin',
+  path: '/superadmin',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RegisterRoute = RegisterRouteImport.update({
+  id: '/register',
+  path: '/register',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
@@ -30,15 +51,67 @@ const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const PublicSignRoute = PublicSignRouteImport.update({
+  id: '/public/sign',
+  path: '/public/sign',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PublicForSignatureQueueRoute = PublicForSignatureQueueRouteImport.update({
+  id: '/public/for-signature-queue',
+  path: '/public/for-signature-queue',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthenticatedAccountRoute = AuthenticatedAccountRouteImport.update({
   id: '/account',
   path: '/account',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AuthenticatedSettingsGeneralRoute =
-  AuthenticatedSettingsGeneralRouteImport.update({
-    id: '/settings/general',
-    path: '/settings/general',
+const AuthenticatedSignatureMySignatureRoute =
+  AuthenticatedSignatureMySignatureRouteImport.update({
+    id: '/signature/MySignature',
+    path: '/signature/MySignature',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedSignatureForSignatureAlternateRoute =
+  AuthenticatedSignatureForSignatureAlternateRouteImport.update({
+    id: '/signature/ForSignatureAlternate',
+    path: '/signature/ForSignatureAlternate',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedSignatureForSignatureRoute =
+  AuthenticatedSignatureForSignatureRouteImport.update({
+    id: '/signature/ForSignature',
+    path: '/signature/ForSignature',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedDocumentsUploadedRoute =
+  AuthenticatedDocumentsUploadedRouteImport.update({
+    id: '/documents/uploaded',
+    path: '/documents/uploaded',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedDocumentsMydocumentRoute =
+  AuthenticatedDocumentsMydocumentRouteImport.update({
+    id: '/documents/mydocument',
+    path: '/documents/mydocument',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedAdminDocumentSearchRoute =
+  AuthenticatedAdminDocumentSearchRouteImport.update({
+    id: '/admin/document-search',
+    path: '/admin/document-search',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedAdminCertificateRequestsRoute =
+  AuthenticatedAdminCertificateRequestsRouteImport.update({
+    id: '/admin/certificate-requests',
+    path: '/admin/certificate-requests',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedAdminActiveCertificatesRoute =
+  AuthenticatedAdminActiveCertificatesRouteImport.update({
+    id: '/admin/active-certificates',
+    path: '/admin/active-certificates',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
 const AuthenticatedAccountAccountRoute =
@@ -51,53 +124,142 @@ const AuthenticatedAccountAccountRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
+  '/register': typeof RegisterRoute
+  '/superadmin': typeof SuperadminRoute
   '/account': typeof AuthenticatedAccountRouteWithChildren
+  '/public/for-signature-queue': typeof PublicForSignatureQueueRoute
+  '/public/sign': typeof PublicSignRoute
   '/account/account': typeof AuthenticatedAccountAccountRoute
-  '/settings/general': typeof AuthenticatedSettingsGeneralRoute
+  '/admin/active-certificates': typeof AuthenticatedAdminActiveCertificatesRoute
+  '/admin/certificate-requests': typeof AuthenticatedAdminCertificateRequestsRoute
+  '/admin/document-search': typeof AuthenticatedAdminDocumentSearchRoute
+  '/documents/mydocument': typeof AuthenticatedDocumentsMydocumentRoute
+  '/documents/uploaded': typeof AuthenticatedDocumentsUploadedRoute
+  '/signature/ForSignature': typeof AuthenticatedSignatureForSignatureRoute
+  '/signature/ForSignatureAlternate': typeof AuthenticatedSignatureForSignatureAlternateRoute
+  '/signature/MySignature': typeof AuthenticatedSignatureMySignatureRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
+  '/register': typeof RegisterRoute
+  '/superadmin': typeof SuperadminRoute
   '/account': typeof AuthenticatedAccountRouteWithChildren
+  '/public/for-signature-queue': typeof PublicForSignatureQueueRoute
+  '/public/sign': typeof PublicSignRoute
   '/': typeof AuthenticatedIndexRoute
   '/account/account': typeof AuthenticatedAccountAccountRoute
-  '/settings/general': typeof AuthenticatedSettingsGeneralRoute
+  '/admin/active-certificates': typeof AuthenticatedAdminActiveCertificatesRoute
+  '/admin/certificate-requests': typeof AuthenticatedAdminCertificateRequestsRoute
+  '/admin/document-search': typeof AuthenticatedAdminDocumentSearchRoute
+  '/documents/mydocument': typeof AuthenticatedDocumentsMydocumentRoute
+  '/documents/uploaded': typeof AuthenticatedDocumentsUploadedRoute
+  '/signature/ForSignature': typeof AuthenticatedSignatureForSignatureRoute
+  '/signature/ForSignatureAlternate': typeof AuthenticatedSignatureForSignatureAlternateRoute
+  '/signature/MySignature': typeof AuthenticatedSignatureMySignatureRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/register': typeof RegisterRoute
+  '/superadmin': typeof SuperadminRoute
   '/_authenticated/account': typeof AuthenticatedAccountRouteWithChildren
+  '/public/for-signature-queue': typeof PublicForSignatureQueueRoute
+  '/public/sign': typeof PublicSignRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/account/account': typeof AuthenticatedAccountAccountRoute
-  '/_authenticated/settings/general': typeof AuthenticatedSettingsGeneralRoute
+  '/_authenticated/admin/active-certificates': typeof AuthenticatedAdminActiveCertificatesRoute
+  '/_authenticated/admin/certificate-requests': typeof AuthenticatedAdminCertificateRequestsRoute
+  '/_authenticated/admin/document-search': typeof AuthenticatedAdminDocumentSearchRoute
+  '/_authenticated/documents/mydocument': typeof AuthenticatedDocumentsMydocumentRoute
+  '/_authenticated/documents/uploaded': typeof AuthenticatedDocumentsUploadedRoute
+  '/_authenticated/signature/ForSignature': typeof AuthenticatedSignatureForSignatureRoute
+  '/_authenticated/signature/ForSignatureAlternate': typeof AuthenticatedSignatureForSignatureAlternateRoute
+  '/_authenticated/signature/MySignature': typeof AuthenticatedSignatureMySignatureRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
     | '/login'
+    | '/register'
+    | '/superadmin'
     | '/account'
+    | '/public/for-signature-queue'
+    | '/public/sign'
     | '/account/account'
-    | '/settings/general'
+    | '/admin/active-certificates'
+    | '/admin/certificate-requests'
+    | '/admin/document-search'
+    | '/documents/mydocument'
+    | '/documents/uploaded'
+    | '/signature/ForSignature'
+    | '/signature/ForSignatureAlternate'
+    | '/signature/MySignature'
   fileRoutesByTo: FileRoutesByTo
-  to: '/login' | '/account' | '/' | '/account/account' | '/settings/general'
+  to:
+    | '/login'
+    | '/register'
+    | '/superadmin'
+    | '/account'
+    | '/public/for-signature-queue'
+    | '/public/sign'
+    | '/'
+    | '/account/account'
+    | '/admin/active-certificates'
+    | '/admin/certificate-requests'
+    | '/admin/document-search'
+    | '/documents/mydocument'
+    | '/documents/uploaded'
+    | '/signature/ForSignature'
+    | '/signature/ForSignatureAlternate'
+    | '/signature/MySignature'
   id:
     | '__root__'
     | '/_authenticated'
     | '/login'
+    | '/register'
+    | '/superadmin'
     | '/_authenticated/account'
+    | '/public/for-signature-queue'
+    | '/public/sign'
     | '/_authenticated/'
     | '/_authenticated/account/account'
-    | '/_authenticated/settings/general'
+    | '/_authenticated/admin/active-certificates'
+    | '/_authenticated/admin/certificate-requests'
+    | '/_authenticated/admin/document-search'
+    | '/_authenticated/documents/mydocument'
+    | '/_authenticated/documents/uploaded'
+    | '/_authenticated/signature/ForSignature'
+    | '/_authenticated/signature/ForSignatureAlternate'
+    | '/_authenticated/signature/MySignature'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
   LoginRoute: typeof LoginRoute
+  RegisterRoute: typeof RegisterRoute
+  SuperadminRoute: typeof SuperadminRoute
+  PublicForSignatureQueueRoute: typeof PublicForSignatureQueueRoute
+  PublicSignRoute: typeof PublicSignRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/superadmin': {
+      id: '/superadmin'
+      path: '/superadmin'
+      fullPath: '/superadmin'
+      preLoaderRoute: typeof SuperadminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/register': {
+      id: '/register'
+      path: '/register'
+      fullPath: '/register'
+      preLoaderRoute: typeof RegisterRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -119,6 +281,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/public/sign': {
+      id: '/public/sign'
+      path: '/public/sign'
+      fullPath: '/public/sign'
+      preLoaderRoute: typeof PublicSignRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/public/for-signature-queue': {
+      id: '/public/for-signature-queue'
+      path: '/public/for-signature-queue'
+      fullPath: '/public/for-signature-queue'
+      preLoaderRoute: typeof PublicForSignatureQueueRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_authenticated/account': {
       id: '/_authenticated/account'
       path: '/account'
@@ -126,11 +302,60 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAccountRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/_authenticated/settings/general': {
-      id: '/_authenticated/settings/general'
-      path: '/settings/general'
-      fullPath: '/settings/general'
-      preLoaderRoute: typeof AuthenticatedSettingsGeneralRouteImport
+    '/_authenticated/signature/MySignature': {
+      id: '/_authenticated/signature/MySignature'
+      path: '/signature/MySignature'
+      fullPath: '/signature/MySignature'
+      preLoaderRoute: typeof AuthenticatedSignatureMySignatureRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/signature/ForSignatureAlternate': {
+      id: '/_authenticated/signature/ForSignatureAlternate'
+      path: '/signature/ForSignatureAlternate'
+      fullPath: '/signature/ForSignatureAlternate'
+      preLoaderRoute: typeof AuthenticatedSignatureForSignatureAlternateRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/signature/ForSignature': {
+      id: '/_authenticated/signature/ForSignature'
+      path: '/signature/ForSignature'
+      fullPath: '/signature/ForSignature'
+      preLoaderRoute: typeof AuthenticatedSignatureForSignatureRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/documents/uploaded': {
+      id: '/_authenticated/documents/uploaded'
+      path: '/documents/uploaded'
+      fullPath: '/documents/uploaded'
+      preLoaderRoute: typeof AuthenticatedDocumentsUploadedRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/documents/mydocument': {
+      id: '/_authenticated/documents/mydocument'
+      path: '/documents/mydocument'
+      fullPath: '/documents/mydocument'
+      preLoaderRoute: typeof AuthenticatedDocumentsMydocumentRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/admin/document-search': {
+      id: '/_authenticated/admin/document-search'
+      path: '/admin/document-search'
+      fullPath: '/admin/document-search'
+      preLoaderRoute: typeof AuthenticatedAdminDocumentSearchRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/admin/certificate-requests': {
+      id: '/_authenticated/admin/certificate-requests'
+      path: '/admin/certificate-requests'
+      fullPath: '/admin/certificate-requests'
+      preLoaderRoute: typeof AuthenticatedAdminCertificateRequestsRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/admin/active-certificates': {
+      id: '/_authenticated/admin/active-certificates'
+      path: '/admin/active-certificates'
+      fullPath: '/admin/active-certificates'
+      preLoaderRoute: typeof AuthenticatedAdminActiveCertificatesRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/account/account': {
@@ -157,13 +382,32 @@ const AuthenticatedAccountRouteWithChildren =
 interface AuthenticatedRouteChildren {
   AuthenticatedAccountRoute: typeof AuthenticatedAccountRouteWithChildren
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
-  AuthenticatedSettingsGeneralRoute: typeof AuthenticatedSettingsGeneralRoute
+  AuthenticatedAdminActiveCertificatesRoute: typeof AuthenticatedAdminActiveCertificatesRoute
+  AuthenticatedAdminCertificateRequestsRoute: typeof AuthenticatedAdminCertificateRequestsRoute
+  AuthenticatedAdminDocumentSearchRoute: typeof AuthenticatedAdminDocumentSearchRoute
+  AuthenticatedDocumentsMydocumentRoute: typeof AuthenticatedDocumentsMydocumentRoute
+  AuthenticatedDocumentsUploadedRoute: typeof AuthenticatedDocumentsUploadedRoute
+  AuthenticatedSignatureForSignatureRoute: typeof AuthenticatedSignatureForSignatureRoute
+  AuthenticatedSignatureForSignatureAlternateRoute: typeof AuthenticatedSignatureForSignatureAlternateRoute
+  AuthenticatedSignatureMySignatureRoute: typeof AuthenticatedSignatureMySignatureRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedAccountRoute: AuthenticatedAccountRouteWithChildren,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
-  AuthenticatedSettingsGeneralRoute: AuthenticatedSettingsGeneralRoute,
+  AuthenticatedAdminActiveCertificatesRoute:
+    AuthenticatedAdminActiveCertificatesRoute,
+  AuthenticatedAdminCertificateRequestsRoute:
+    AuthenticatedAdminCertificateRequestsRoute,
+  AuthenticatedAdminDocumentSearchRoute: AuthenticatedAdminDocumentSearchRoute,
+  AuthenticatedDocumentsMydocumentRoute: AuthenticatedDocumentsMydocumentRoute,
+  AuthenticatedDocumentsUploadedRoute: AuthenticatedDocumentsUploadedRoute,
+  AuthenticatedSignatureForSignatureRoute:
+    AuthenticatedSignatureForSignatureRoute,
+  AuthenticatedSignatureForSignatureAlternateRoute:
+    AuthenticatedSignatureForSignatureAlternateRoute,
+  AuthenticatedSignatureMySignatureRoute:
+    AuthenticatedSignatureMySignatureRoute,
 }
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
@@ -173,6 +417,10 @@ const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
   LoginRoute: LoginRoute,
+  RegisterRoute: RegisterRoute,
+  SuperadminRoute: SuperadminRoute,
+  PublicForSignatureQueueRoute: PublicForSignatureQueueRoute,
+  PublicSignRoute: PublicSignRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
