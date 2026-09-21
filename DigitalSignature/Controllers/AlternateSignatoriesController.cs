@@ -31,7 +31,7 @@ namespace DigitalSignature.Controllers
         // active" — used by both my_principals and IsActiveAlternateForAsync so
         // they can never drift apart. Assumes the table is aliased "a".
         private const string ActiveAlternateCondition =
-            "a.isactive = 1 AND (a.is_permanent = 1 OR (GETDATE() BETWEEN a.dateFrom AND a.dateTo))";
+            "a.isactive = 1 AND (a.is_permanent = 1 OR (CAST(GETDATE() AS DATE) BETWEEN a.dateFrom AND a.dateTo))";
 
         // Caller's own identity from JWT claims — never trust a client-supplied
         // "owner" eid/userType for anything that reads or mutates someone's own
@@ -58,8 +58,8 @@ namespace DigitalSignature.Controllers
                       a.user_alternate_type AS AlternateUserType,
                       sn.fname AS AlternateName,
                       sn.office_name AS AlternateOffice,
-                      a.isactive AS IsActive,
-                      a.is_permanent AS IsPermanent,
+                      ISNULL(a.isactive, 0) AS IsActive,
+                      ISNULL(a.is_permanent, 0) AS IsPermanent,
                       a.dateFrom AS DateFrom,
                       a.dateTo AS DateTo
                   FROM bacpdfsign.dbo.alternate_signatories a
@@ -81,6 +81,14 @@ namespace DigitalSignature.Controllers
 
             if (request.AlternateEid == me.Value.Eid && request.AlternateUserType == me.Value.UserType)
                 return BadRequest(new { success = false, message = "You cannot set yourself as your own alternate." });
+
+            if (!request.IsPermanent)
+            {
+                if (request.DateFrom is null || request.DateTo is null)
+                    return BadRequest(new { success = false, message = "Both a start and end date are required unless this alternate is permanent." });
+                if (request.DateFrom > request.DateTo)
+                    return BadRequest(new { success = false, message = "The start date must not be after the end date." });
+            }
 
             var existing = await _dbService.ExecuteScalarAsync<int, dynamic>(
                 @"SELECT COUNT(1) FROM bacpdfsign.dbo.alternate_signatories
@@ -117,6 +125,14 @@ namespace DigitalSignature.Controllers
         {
             var me = GetCurrentUser();
             if (me is null) return Unauthorized();
+
+            if (!request.IsPermanent)
+            {
+                if (request.DateFrom is null || request.DateTo is null)
+                    return BadRequest(new { success = false, message = "Both a start and end date are required unless this alternate is permanent." });
+                if (request.DateFrom > request.DateTo)
+                    return BadRequest(new { success = false, message = "The start date must not be after the end date." });
+            }
 
             var affected = await _dbService.ExecuteAsync(
                 @"UPDATE bacpdfsign.dbo.alternate_signatories
