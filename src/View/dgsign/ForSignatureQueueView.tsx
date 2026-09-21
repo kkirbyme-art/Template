@@ -1,26 +1,27 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /*
  * NOTE — intentional near-duplicate:
- * This file is a ~1,900-line copy of src/View/dgsign/ForSignatureQueueView.tsx,
- * made deliberately (not a mistake/drift) so the alternate-signing queue can
- * diverge from the normal one without a shared abstraction. A fix or feature
- * change made in that file (the signing dialog, PDF viewer wiring, batch
- * signing flow, etc.) will NOT automatically reach this one — check both.
+ * src/View/dgsign/ForSignatureAlternateQueueView.tsx is a ~1,900-line copy of
+ * this file, made deliberately (not a mistake/drift) so the alternate-signing
+ * queue can diverge from the normal one without a shared abstraction. A fix
+ * or feature change made here (the signing dialog, PDF viewer wiring, batch
+ * signing flow, etc.) will NOT automatically reach that file — check both.
  *
  * The two files differ only at these points:
- *  - Identity source for fetch calls: the normal file uses the caller's own
+ *  - Identity source for fetch calls: this file uses the caller's own
  *    baseEID/baseUser_Type and the plain get_pending_document_types /
- *    get_pending_documents endpoints; this file uses a selected principal's
- *    eid/userType against the AlternateSignatories/pending_document_types_as_alternate
- *    and .../pending_documents_as_alternate endpoints instead.
- *  - Identity source for the signing payload: the normal file sends
- *    isAlternate: 0 with empty vwEids/vwUserType; this file sends
+ *    get_pending_documents endpoints; the alternate file uses a
+ *    selected-principal's eid/userType against the
+ *    AlternateSignatories/pending_document_types_as_alternate and
+ *    .../pending_documents_as_alternate endpoints instead.
+ *  - Identity source for the signing payload: this file sends
+ *    isAlternate: 0 with empty vwEids/vwUserType; the alternate file sends
  *    isAlternate: 1 and the selected principal's eid/userType, and also
  *    passes a signAsAlternate prop into the PDF signing view.
- *  - This file adds a principal-picker dropdown ("Signing on behalf of:")
- *    above the header, backed by AlternateSignatories/my_principals, since
- *    one alternate can be picked by several principals at once.
- *  - Header text ("For Signature (Alternate)" vs "For Signature" and the
+ *  - The alternate file adds a principal-picker dropdown ("Signing on behalf
+ *    of:") above the header, backed by AlternateSignatories/my_principals,
+ *    since one alternate can be picked by several principals at once.
+ *  - Header text ("For Signature" vs "For Signature (Alternate)" and the
  *    subtitle).
  */
 import {
@@ -94,7 +95,7 @@ import {
   // Upload (unused here)
 } from 'lucide-react'
 import { pdfjs } from 'react-pdf';
-import { baseEID, baseUser_Type, basePathUrl, baseLevel, authFetch, apiControllerBase, baseCP, baseEMAIL, apiUrl } from '@/lib/config'
+import { baseEID, baseUser_Type, basePathUrl, baseLevel, authFetch, apiControllerBase, baseCP, baseEMAIL } from '@/lib/config'
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -631,33 +632,8 @@ const DetailPanel = ({ doc }: { doc: PendingDocument }) => {
 
 // ---------- Component ----------
 
-interface AlternatePrincipal {
-  principalEid: number
-  principalUserType: number
-  principalName: string | null
-  principalOffice: string | null
-}
-
-export default function ForSignatureAlternateQueueView() {
+export default function ForSignatureQueueView() {
   const currentYear = new Date().getFullYear()
-
-  const [principals, setPrincipals] = useState<AlternatePrincipal[]>([])
-  const [selectedPrincipal, setSelectedPrincipal] = useState<AlternatePrincipal | null>(null)
-  const [loadingPrincipals, setLoadingPrincipals] = useState(true)
-
-  useEffect(() => {
-    let cancelled = false
-    authFetch(apiUrl('AlternateSignatories/my_principals'))
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data: AlternatePrincipal[]) => {
-        if (cancelled) return
-        setPrincipals(data)
-        setSelectedPrincipal((prev) => prev ?? data[0] ?? null)
-      })
-      .catch(() => { if (!cancelled) setPrincipals([]) })
-      .finally(() => { if (!cancelled) setLoadingPrincipals(false) })
-    return () => { cancelled = true }
-  }, [])
 
   const [year, setYear] = useState<number>(currentYear)
   const [docTypes, setDocTypes] = useState<PendingDocumentType[]>([])
@@ -689,17 +665,16 @@ export default function ForSignatureAlternateQueueView() {
 
   // Fetch document types
   const fetchDocTypes = useCallback(async () => {
-    if (!selectedPrincipal) { setDocTypes([]); setActiveTab(''); setDocuments([]); return }
     setLoadingTypes(true)
     setError(null)
     try {
       const params = new URLSearchParams({
         year: String(year),
-        principalEid: String(selectedPrincipal.principalEid),
-        principalUserType: String(selectedPrincipal.principalUserType),
+        eid: String(baseEID),
+        userType: String(baseUser_Type),
       })
       const res = await authFetch(
-        apiUrl(`AlternateSignatories/pending_document_types_as_alternate?${params}`),
+        `${basePathUrl}api/${apiControllerBase}/get_pending_document_types?${params}`,
         { method: 'GET', headers: { 'Content-Type': 'application/json' } },
       )
       if (!res.ok) throw new Error('Failed to fetch document types')
@@ -717,23 +692,23 @@ export default function ForSignatureAlternateQueueView() {
     } finally {
       setLoadingTypes(false)
     }
-  }, [year, selectedPrincipal])
+  }, [year])
 
   // Fetch pending documents — map API fields (lowercase) to our interface (uppercase)
   const fetchDocuments = useCallback(
     async (docTypeId: string) => {
-      if (!docTypeId || !selectedPrincipal) return
+      if (!docTypeId) return
       setLoadingDocs(true)
       setError(null)
       try {
         const params = new URLSearchParams({
           year: String(year),
-          principalEid: String(selectedPrincipal.principalEid),
-          principalUserType: String(selectedPrincipal.principalUserType),
+          eid: String(baseEID),
+          userType: String(baseUser_Type),
           docTypeId,
         })
         const res = await authFetch(
-          apiUrl(`AlternateSignatories/pending_documents_as_alternate?${params}`),
+          `${basePathUrl}api/${apiControllerBase}/get_pending_documents?${params}`,
           { method: 'GET', headers: { 'Content-Type': 'application/json' } },
         )
         console.log(res);
@@ -780,7 +755,7 @@ export default function ForSignatureAlternateQueueView() {
         setLoadingDocs(false)
       }
     },
-    [year, selectedPrincipal],
+    [year],
   )
 
   useEffect(() => {
@@ -1082,9 +1057,9 @@ export default function ForSignatureAlternateQueueView() {
           modsId: '1',
           isDisplayDate: 0,
           isDelegate: 0,
-          isAlternate: selectedPrincipal ? 1 : 0,
-          vwEids: selectedPrincipal ? String(selectedPrincipal.principalEid) : '',
-          vwUserType: selectedPrincipal ? String(selectedPrincipal.principalUserType) : '',
+          isAlternate: 0,
+          vwEids: '',
+          vwUserType: '',
           dateNTimeClick: new Date().toISOString(),
           dgLatitude: latitude,
           dgLongitude: longitude,
@@ -1148,33 +1123,6 @@ export default function ForSignatureAlternateQueueView() {
   return (
     <div className="w-full min-w-0 space-y-6">
       <div className="w-full min-w-0 flex flex-col gap-4 p-4 md:p-6">
-        {/* Principal picker — at the very top, since one alternate can be
-            chosen by several principals at once (e.g. both employee 1 and
-            employee 2 set employee 3 as their alternate). */}
-        <div className="flex items-center gap-2 rounded-xl border bg-card p-3">
-          <Users className="h-4 w-4 text-muted-foreground shrink-0" />
-          <span className="text-sm text-muted-foreground shrink-0">Signing on behalf of:</span>
-          <Select
-            value={selectedPrincipal ? `${selectedPrincipal.principalEid}-${selectedPrincipal.principalUserType}` : ''}
-            onValueChange={(v) => {
-              const found = principals.find((p) => `${p.principalEid}-${p.principalUserType}` === v)
-              setSelectedPrincipal(found ?? null)
-            }}
-            disabled={loadingPrincipals || principals.length === 0}
-          >
-            <SelectTrigger className="w-64">
-              <SelectValue placeholder={loadingPrincipals ? 'Loading…' : 'Select a principal'} />
-            </SelectTrigger>
-            <SelectContent>
-              {principals.map((p) => (
-                <SelectItem key={`${p.principalEid}-${p.principalUserType}`} value={`${p.principalEid}-${p.principalUserType}`}>
-                  {p.principalName ?? `EID ${p.principalEid}`}{p.principalOffice ? ` — ${p.principalOffice}` : ''}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-xl bg-primary p-5 text-primary-foreground shadow-lg">
           <div className="flex items-center gap-3">
@@ -1183,10 +1131,10 @@ export default function ForSignatureAlternateQueueView() {
             </div>
             <div>
               <h1 className="text-2xl font-bold tracking-tight">
-                For Signature (Alternate)
+                For Signature
               </h1>
               <p className="text-sm text-primary-foreground/70">
-                Review and sign documents on behalf of your principal
+                Review and sign your pending documents
               </p>
             </div>
           </div>
@@ -1911,11 +1859,6 @@ export default function ForSignatureAlternateQueueView() {
                       bulkSignMode
                         ? handleBulkFirstDocSigned
                         : () => handleBatchDocSigned()
-                    }
-                    signAsAlternate={
-                      selectedPrincipal
-                        ? { vwEids: String(selectedPrincipal.principalEid), vwUserType: String(selectedPrincipal.principalUserType) }
-                        : undefined
                     }
                   />
                 ) : (
