@@ -1339,9 +1339,11 @@ public class SigningService : ISigningService
 
             // 8a. For an alternate/delegate signature, open a transaction and
             // insert a brand-new document_signatories row cloned from the
-            // principal's pending row (same doc/order/level/etc.) but under
-            // the alternate's own identity and already marked signed. This
-            // gives the signing pass a real row of its own to attach
+            // principal's pending row (same doc/order/etc.) but under the
+            // alternate's own identity, already marked signed, and always at
+            // sig_level 4 ("for alternative signature" in
+            // signatory_leveltype), regardless of the principal's own level.
+            // This gives the signing pass a real row of its own to attach
             // document_signature_location entries to, and lets the insert
             // roll back along with everything else below if anything fails.
             var insertSigIdForLocation = signId;
@@ -1371,7 +1373,7 @@ public class SigningService : ISigningService
                             QuerySigned = (object?)principalRow.SigQuerySigned ?? DBNull.Value,
                             QueryReturn = (object?)principalRow.SigQueryReturn ?? DBNull.Value,
                             SigUserType = request.UserType,
-                            principalRow.SigLevel,
+                            SigLevel = 4,
                             principalRow.SigSignCount
                         },
                         CommandType.Text,
