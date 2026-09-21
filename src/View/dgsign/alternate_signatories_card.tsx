@@ -45,12 +45,28 @@ interface Alternate {
   dateTo: string | null
 }
 
+// Compares calendar dates only (YYYY-MM-DD substrings), never full Date
+// instants. dateFrom/dateTo come from the server as date-only values; parsing
+// them with `new Date(...)` treats them as UTC midnight, which makes
+// `now <= new Date(dateTo)` false for nearly all of the actual "dateTo"
+// calendar day in any timezone behind UTC. Taking the local YYYY-MM-DD for
+// "now" and the raw YYYY-MM-DD substring for the bounds keeps this correct
+// regardless of the viewer's timezone, without needing a date library.
+function toLocalDateOnly(d: Date): string {
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 function isCurrentlyActive(a: Alternate): boolean {
   if (!a.isActive) return false
   if (a.isPermanent) return true
   if (!a.dateFrom || !a.dateTo) return false
-  const now = new Date()
-  return now >= new Date(a.dateFrom) && now <= new Date(a.dateTo)
+  const today = toLocalDateOnly(new Date())
+  const from = a.dateFrom.slice(0, 10)
+  const to = a.dateTo.slice(0, 10)
+  return today >= from && today <= to
 }
 
 export default function AlternateSignatoriesCard() {
