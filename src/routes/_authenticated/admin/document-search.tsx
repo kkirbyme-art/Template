@@ -831,12 +831,14 @@ function AdminDocumentViewDialog({
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     DocId: doc.docId,
-                    Signatories: pendingRows.map((r) => ({
+                    Signatories: rows.map((r) => ({
+                        SigId: r.sigId,
                         Eid: r.eid,
                         UserType: r.userType,
                         Order: r.order,
                         NumSignatures: r.numSignatures,
                         Level: r.level,
+                        Status: r.statusId,
                     })),
                 }),
             })
