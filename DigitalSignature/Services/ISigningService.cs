@@ -91,6 +91,10 @@ public interface ISigningService
     // or re-run any of the notification/routing side effects a real sign does.
     Task<AdminUpdateSignatoryStatusResult> AdminUpdateSignatoryStatusAsync(AdminUpdateSignatoryStatusRequest request, int actorEid, int actorUserType);
 
+    // Read-only history of admin-initiated signatory changes for a document,
+    // newest first — backs the Document Search dialog's audit panel.
+    Task<List<AdminSignatoryAuditDto>> GetAdminSignatoryAuditAsync(int docId);
+
     // Supporting documents are independent of the edit lock — always allowed.
     Task<AddSupportingFileResult> AddSupportingFileAsync(int docId, int eid, IFormFile file);
 

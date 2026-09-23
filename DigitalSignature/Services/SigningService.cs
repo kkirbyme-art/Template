@@ -2726,6 +2726,23 @@ public class SigningService : ISigningService
             tx);
     }
 
+    // Read-only history of admin-initiated signatory changes for a document,
+    // newest first — backs the Document Search dialog's audit panel.
+    public async Task<List<AdminSignatoryAuditDto>> GetAdminSignatoryAuditAsync(int docId)
+    {
+        var rows = await _dbService.QueryAsync<AdminSignatoryAuditDto, dynamic>(
+            @"SELECT id AS Id, doc_id AS DocId, sig_id AS SigId, action AS Action,
+                     changed_by_eid AS ChangedByEid, changed_by_user_type AS ChangedByUserType,
+                     changed_by_name AS ChangedByName, signatory_snapshot AS SignatorySnapshot,
+                     location_snapshot AS LocationSnapshot, changed_at AS ChangedAt
+              FROM bacpdfsign.dbo.admin_signatory_audit
+              WHERE doc_id = @DocId
+              ORDER BY changed_at DESC",
+            new { DocId = docId },
+            CommandType.Text);
+        return rows.ToList();
+    }
+
     // Admin-only signatory edit — full per-row diff against the submitted
     // list. See docs/superpowers/specs/2026-09-23-admin-signatory-audit-design.md.
     public async Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(

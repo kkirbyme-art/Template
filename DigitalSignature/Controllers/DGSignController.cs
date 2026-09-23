@@ -725,7 +725,8 @@ namespace DigitalSignature.Controllers
             if (!await IsCurrentUserAdminAsync())
                 return Forbid();
 
-            var result = await _signingService.AdminUpdateSignatoriesAsync(request);
+            var actor = GetCurrentActor();
+            var result = await _signingService.AdminUpdateSignatoriesAsync(request, actor.Eid, actor.UserType);
             if (!result.Success)
             {
                 return result.IsServerError
@@ -744,7 +745,8 @@ namespace DigitalSignature.Controllers
             if (!await IsCurrentUserAdminAsync())
                 return Forbid();
 
-            var result = await _signingService.AdminUpdateSignatoryStatusAsync(request);
+            var actor = GetCurrentActor();
+            var result = await _signingService.AdminUpdateSignatoryStatusAsync(request, actor.Eid, actor.UserType);
             if (!result.Success)
             {
                 return result.IsServerError
@@ -753,6 +755,18 @@ namespace DigitalSignature.Controllers
             }
 
             return Ok(new { success = true });
+        }
+
+        // Read-only history for the Document Search dialog's audit panel —
+        // every admin-initiated signatory change on this document.
+        [HttpGet("admin_get_signatory_audit")]
+        public async Task<IActionResult> AdminGetSignatoryAudit([FromQuery] int docId)
+        {
+            if (!await IsCurrentUserAdminAsync())
+                return Forbid();
+
+            var rows = await _signingService.GetAdminSignatoryAuditAsync(docId);
+            return Ok(rows);
         }
 
         // ==================== ADD SUPPORTING DOCUMENT ====================
@@ -1820,6 +1834,18 @@ select @id as reg_id;
                 CommandType.Text
             );
             return count > 0;
+        }
+
+        // Parses the caller's own eid/user_type from JWT claims — same
+        // source IsCurrentUserAdminAsync trusts. Used to attribute
+        // admin_signatory_audit rows to the actual acting admin.
+        private (int Eid, int UserType) GetCurrentActor()
+        {
+            var eidClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var userTypeClaim = User.FindFirstValue("UserType");
+            int.TryParse(eidClaim, out var eid);
+            int.TryParse(userTypeClaim, out var userType);
+            return (eid, userType);
         }
 
         [HttpGet("check_admin")]
