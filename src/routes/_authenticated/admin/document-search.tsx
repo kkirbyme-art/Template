@@ -906,7 +906,7 @@ function AdminDocumentViewDialog({
                                 </div>
                                 <div className="space-y-1.5">
                                     <Label>Doc Code</Label>
-                                    <Input value={docCode} onChange={(e) => setDocCode(e.target.value)} />
+                                    <Input value={docCode} disabled />
                                 </div>
                                 <div className="space-y-1.5">
                                     <Label>Document Status</Label>
