@@ -87,17 +87,29 @@ public interface ISigningService
     // document's existing directory/name. Never touches document_signatories.
     Task<AdminUpdateDocumentResult> AdminUpdateDocumentAsync(AdminUpdateDocumentRequest request, IFormFile? pdfFile);
 
-    // Admin-only signatory edit — only ever deletes/reinserts sig_status = 0
-    // (pending) rows. Already-signed rows (sig_status = 1) and their sig_id
-    // are always left untouched, so history keyed off sig_id
-    // (document_signature_location etc.) is never orphaned.
-    Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(AdminUpdateSignatoriesRequest request);
+    // Per-row diff against the submitted list — deletes rows missing from it,
+    // updates sig_order/sig_sign_count on rows present, inserts rows with no
+    // SigId, at any status (signed rows are no longer protected). It does NOT
+    // write sig_status on an existing row; that is AdminUpdateSignatoryStatusAsync's
+    // job alone, so a stale batch payload can't revert a signature. Every
+    // touched row that was already signed gets an admin_signatory_audit
+    // snapshot (including its document_signature_location rows, minus the
+    // certificate password/pfx_id) before being changed. Rejects the whole
+    // request if any submitted SigId doesn't belong to request.DocId.
+    Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(AdminUpdateSignatoriesRequest request, int actorEid, int actorUserType);
 
-    // Admin override of a single signatory row's sig_status by sig_id —
-    // works on already-signed rows too (unlike AdminUpdateSignatoriesAsync).
+    // Admin override of a single signatory row's sig_status by sig_id — the
+    // only path that changes an existing row's status, and it works on
+    // already-signed rows.
     // Just flips the status value; does not touch document_signature_location
     // or re-run any of the notification/routing side effects a real sign does.
-    Task<AdminUpdateSignatoryStatusResult> AdminUpdateSignatoryStatusAsync(AdminUpdateSignatoryStatusRequest request);
+    Task<AdminUpdateSignatoryStatusResult> AdminUpdateSignatoryStatusAsync(AdminUpdateSignatoryStatusRequest request, int actorEid, int actorUserType);
+
+    // Read-only history of admin-initiated signatory changes for a document,
+    // newest first — backs the Document Search dialog's audit panel. Returns
+    // the full stored rows including the snapshot blobs; the
+    // admin_get_signatory_audit endpoint projects those out before responding.
+    Task<List<AdminSignatoryAuditDto>> GetAdminSignatoryAuditAsync(int docId);
 
     // Supporting documents are independent of the edit lock — always allowed.
     Task<AddSupportingFileResult> AddSupportingFileAsync(int docId, int eid, IFormFile file);

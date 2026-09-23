@@ -54,7 +54,6 @@ import {
     Upload,
     X,
     Trash2,
-    Lock,
     Eye,
     Building2,
     FileText,
@@ -114,23 +113,38 @@ interface DocTypeOption {
     documentDescription: string
 }
 
-interface PendingSignatoryRow {
-    id: string | number
+interface SignatoryRow {
+    id: string | number      // React key: numeric sigId for existing rows, "new-<eid>" for unsaved additions
+    sigId: number | null     // null until this row is saved
     name: string
     abbrValue?: string
     eid: number
     userType: number
+    statusId: number
     numSignatures: number
     order: number
     level: number
 }
 
-interface SignedSignatoryRow {
-    sigId: number
-    name: string
-    order: number
-    level: number
-    statusId: number
+// Mirrors what admin_get_signatory_audit returns. The server deliberately
+// withholds signatory_snapshot/location_snapshot (they describe a signer's
+// stored row and stay server-side for forensics), so they are absent here.
+interface AdminSignatoryAuditRow {
+    id: number
+    docId: number
+    sigId: number | null
+    action: string
+    changedByEid: string
+    changedByUserType: string
+    changedByName: string | null
+    changedAt: string
+}
+
+// changedAt arrives as a serialized DateTime (e.g. "2026-09-23T14:05:11").
+// Fall back to the raw string if it doesn't parse rather than showing "Invalid Date".
+function formatAuditTimestamp(value: string): string {
+    const d = new Date(value)
+    return Number.isNaN(d.getTime()) ? value : d.toLocaleString()
 }
 
 // doc_status_id values GetPdfDigitalOnlyAsync serves watermarked, and
@@ -635,9 +649,18 @@ function AdminDocumentViewDialog({
     const [pdfDragOver, setPdfDragOver] = React.useState(false)
     const pdfInputRef = React.useRef<HTMLInputElement>(null)
 
-    const [signedRows, setSignedRows] = React.useState<SignedSignatoryRow[]>([])
-    const [pendingRows, setPendingRows] = React.useState<PendingSignatoryRow[]>([])
+    const [rows, setRows] = React.useState<SignatoryRow[]>([])
     const [selectedIds, setSelectedIds] = React.useState<(string | number)[]>([])
+    // Set when get_document_for_edit fails. Saving on a failed load would submit
+    // an empty/stale signatory list, which the backend reads as "delete every
+    // signatory on this document" — so Save stays disabled until a load succeeds.
+    const [loadError, setLoadError] = React.useState(false)
+
+    const [auditRows, setAuditRows] = React.useState<AdminSignatoryAuditRow[]>([])
+    const [auditLoading, setAuditLoading] = React.useState(false)
+    const [auditError, setAuditError] = React.useState<string | null>(null)
+    const [auditOpen, setAuditOpen] = React.useState(false)
+    const [auditReloadToken, setAuditReloadToken] = React.useState(0)
 
     const [sigStatusOptions, setSigStatusOptions] = React.useState<DocStatusOption[]>([])
     const [updatingSigId, setUpdatingSigId] = React.useState<number | null>(null)
@@ -665,6 +688,11 @@ function AdminDocumentViewDialog({
         setStatusId(String(doc.docStatusId ?? ""))
         setTypeId(doc.docTypeId != null ? String(doc.docTypeId) : "")
         setPdfFile(null)
+        // Clear the previous document's signatories up front — otherwise a failed
+        // load below would leave doc A's rows on screen while Save targets doc B.
+        setRows([])
+        setSelectedIds([])
+        setLoadError(false)
 
             ; (async () => {
                 setLoading(true)
@@ -675,30 +703,21 @@ function AdminDocumentViewDialog({
                     if (cancelled) return
 
                     const allSigs = data.signatories ?? []
-                    const signed = allSigs
-                        .filter((s: any) => (s.sigStatus ?? 0) !== 0)
-                        .map((s: any) => ({
-                            sigId: s.sigId,
-                            name: s.fname || String(s.sigEid),
-                            order: s.sigOrder,
-                            level: s.sigLevel,
-                            statusId: s.sigStatus ?? 0,
-                        }))
-                    const pending: PendingSignatoryRow[] = allSigs
-                        .filter((s: any) => (s.sigStatus ?? 0) === 0)
-                        .map((s: any) => ({
-                            id: s.sigId,
-                            name: s.fname || String(s.sigEid),
-                            eid: s.sigEid,
-                            userType: s.sigUserType,
-                            numSignatures: s.sigSignCount ?? 1,
-                            order: s.sigOrder ?? 1,
-                            level: s.sigLevel ?? 1,
-                        }))
-                    setSignedRows(signed)
-                    setPendingRows(pending)
-                    setSelectedIds(pending.map((p) => p.id))
+                    const mapped: SignatoryRow[] = allSigs.map((s: any) => ({
+                        id: s.sigId,
+                        sigId: s.sigId,
+                        name: s.fname || String(s.sigEid),
+                        eid: s.sigEid,
+                        userType: s.sigUserType,
+                        statusId: s.sigStatus ?? 0,
+                        numSignatures: s.sigSignCount ?? 1,
+                        order: s.sigOrder ?? 1,
+                        level: s.sigLevel ?? 1,
+                    }))
+                    setRows(mapped)
+                    setSelectedIds(mapped.map((r) => r.id))
                 } catch {
+                    if (!cancelled) setLoadError(true)
                     toast.error("Failed to load document details.")
                 } finally {
                     if (!cancelled) setLoading(false)
@@ -706,6 +725,28 @@ function AdminDocumentViewDialog({
             })()
         return () => { cancelled = true }
     }, [doc])
+
+    React.useEffect(() => {
+        if (!doc) {
+            setAuditRows([])
+            setAuditError(null)
+            return
+        }
+        let cancelled = false
+        setAuditLoading(true)
+        setAuditError(null)
+        authFetch(apiUrl(`DGSign/admin_get_signatory_audit?docId=${doc.docId}`))
+            .then((res: Response) => {
+                if (!res.ok) throw new Error(`Failed to load history (${res.status})`)
+                return res.json()
+            })
+            .then((data: AdminSignatoryAuditRow[]) => { if (!cancelled) setAuditRows(data ?? []) })
+            .catch((err: unknown) => {
+                if (!cancelled) setAuditError(err instanceof Error ? err.message : "Failed to load history")
+            })
+            .finally(() => { if (!cancelled) setAuditLoading(false) })
+        return () => { cancelled = true }
+    }, [doc, auditReloadToken])
 
     // PDF preview
     React.useEffect(() => {
@@ -740,7 +781,7 @@ function AdminDocumentViewDialog({
 
     const handleSignatoryChange = (ids: (string | number)[], items: DynamicMultiModel[]) => {
         setSelectedIds(ids)
-        setPendingRows((prev) => {
+        setRows((prev) => {
             const kept = prev.filter((row) => ids.some((id) => String(id) === String(row.id)))
             const keptIds = new Set(kept.map((r) => String(r.id)))
             let nextOrder = kept.length ? Math.max(...kept.map((r) => r.order)) + 1 : 1
@@ -748,10 +789,12 @@ function AdminDocumentViewDialog({
                 .filter((item) => !keptIds.has(String(item.id)))
                 .map((item) => ({
                     id: `new-${item.id}`,
+                    sigId: null,
                     name: item.value,
                     abbrValue: item.abbr_value,
                     eid: Number(item.additional_id ?? 0),
                     userType: Number((item as Record<string, unknown>)["additional_Id_two"] ?? 0),
+                    statusId: 0,
                     numSignatures: 1,
                     order: nextOrder++,
                     level: 1,
@@ -760,20 +803,23 @@ function AdminDocumentViewDialog({
         })
     }
 
-    const removePending = (id: string | number) => {
+    const removeRow = (id: string | number) => {
         setSelectedIds((prev) => prev.filter((s) => String(s) !== String(id)))
-        setPendingRows((prev) => prev.filter((row) => String(row.id) !== String(id)))
+        setRows((prev) => prev.filter((row) => String(row.id) !== String(id)))
     }
 
-    const updatePendingOrder = (id: string | number, order: number) => {
-        setPendingRows((prev) => prev.map((row) => (String(row.id) === String(id) ? { ...row, order } : row)))
+    const updateRowOrder = (id: string | number, order: number) => {
+        setRows((prev) => prev.map((row) => (String(row.id) === String(id) ? { ...row, order } : row)))
     }
 
-    const updatePendingCount = (id: string | number, numSignatures: number) => {
-        setPendingRows((prev) => prev.map((row) => (String(row.id) === String(id) ? { ...row, numSignatures } : row)))
+    const updateRowCount = (id: string | number, numSignatures: number) => {
+        setRows((prev) => prev.map((row) => (String(row.id) === String(id) ? { ...row, numSignatures } : row)))
     }
 
-    const handleSignedStatusChange = async (sigId: number, newStatusId: number) => {
+    // Status is applied immediately (this row already exists server-side);
+    // order/count/delete/add stay local and go through the batch Save
+    // below, same as before.
+    const handleRowStatusChange = async (sigId: number, newStatusId: number) => {
         setUpdatingSigId(sigId)
         try {
             const res = await authFetch(apiUrl("DGSign/admin_update_signatory_status"), {
@@ -784,13 +830,19 @@ function AdminDocumentViewDialog({
             const data = await res.json().catch(() => null)
             if (!res.ok || !data?.success) throw new Error(data?.message ?? "Failed to update signatory status")
 
-            setSignedRows((prev) => prev.map((r) => (r.sigId === sigId ? { ...r, statusId: newStatusId } : r)))
+            setRows((prev) => prev.map((r) => (r.sigId === sigId ? { ...r, statusId: newStatusId } : r)))
             toast.success("Signatory status updated.")
         } catch (error) {
             toast.error(error instanceof Error ? error.message : "Failed to update signatory status.")
         } finally {
             setUpdatingSigId(null)
         }
+    }
+
+    // A brand-new row (no sigId yet) has nothing to PATCH — its status is
+    // just local state until the batch Save inserts it.
+    const updateRowStatus = (id: string | number, statusId: number) => {
+        setRows((prev) => prev.map((row) => (String(row.id) === String(id) ? { ...row, statusId } : row)))
     }
 
     const handleForceReload = async () => {
@@ -838,12 +890,14 @@ function AdminDocumentViewDialog({
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     DocId: doc.docId,
-                    Signatories: pendingRows.map((r) => ({
+                    Signatories: rows.map((r) => ({
+                        SigId: r.sigId,
                         Eid: r.eid,
                         UserType: r.userType,
                         Order: r.order,
                         NumSignatures: r.numSignatures,
                         Level: r.level,
+                        Status: r.statusId,
                     })),
                 }),
             })
@@ -906,7 +960,7 @@ function AdminDocumentViewDialog({
                                 </div>
                                 <div className="space-y-1.5">
                                     <Label>Doc Code</Label>
-                                    <Input value={docCode} onChange={(e) => setDocCode(e.target.value)} />
+                                    <Input value={docCode} disabled />
                                 </div>
                                 <div className="space-y-1.5">
                                     <Label>Document Status</Label>
@@ -977,42 +1031,9 @@ function AdminDocumentViewDialog({
                                 <div className="space-y-3">
                                     <Label>Signatories</Label>
 
-                                    {signedRows.length > 0 && (
-                                        <div className="rounded-lg border divide-y bg-muted/20">
-                                            {signedRows.map((row) => (
-                                                <div key={row.sigId} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
-                                                    <span className="flex items-center gap-1.5 text-muted-foreground truncate">
-                                                        <Lock className="h-3 w-3 shrink-0" />
-                                                        <span className="truncate">{row.name} — order {row.order}</span>
-                                                    </span>
-                                                    <Select
-                                                        value={String(row.statusId)}
-                                                        onValueChange={(v) => handleSignedStatusChange(row.sigId, Number(v))}
-                                                        disabled={updatingSigId === row.sigId}
-                                                    >
-                                                        <SelectTrigger className="h-7 w-32 text-xs shrink-0">
-                                                            {updatingSigId === row.sigId ? (
-                                                                <Loader2 className="h-3 w-3 animate-spin" />
-                                                            ) : (
-                                                                <SelectValue />
-                                                            )}
-                                                        </SelectTrigger>
-                                                        <SelectContent>
-                                                            {sigStatusOptions.map((s) => (
-                                                                <SelectItem key={s.id} value={String(s.id)} className="text-xs">
-                                                                    {s.statusType}
-                                                                </SelectItem>
-                                                            ))}
-                                                        </SelectContent>
-                                                    </Select>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
-
                                     <DynamicMultiSelect
                                         api={apiUrl("references/get_listofSignatories")}
-                                        placeholder="Add pending signatories..."
+                                        placeholder="Add signatories..."
                                         value={selectedIds}
                                         maxBadges={2}
                                         showSelectAll={false}
@@ -1023,28 +1044,55 @@ function AdminDocumentViewDialog({
                                         onChangeCallback={handleSignatoryChange}
                                     />
 
-                                    {pendingRows.length > 0 && (
+                                    {rows.length > 0 && (
                                         <div className="rounded-lg border overflow-hidden">
                                             <div className="overflow-x-auto">
                                                 <Table>
                                                     <TableHeader>
                                                         <TableRow className="bg-muted/40 hover:bg-muted/40">
                                                             <TableHead>Name</TableHead>
+                                                            <TableHead className="w-36">Status</TableHead>
                                                             <TableHead className="text-center w-20">Count</TableHead>
                                                             <TableHead className="text-center w-20">Order</TableHead>
                                                             <TableHead className="text-center w-14">Remove</TableHead>
                                                         </TableRow>
                                                     </TableHeader>
                                                     <TableBody>
-                                                        {pendingRows.map((row) => (
+                                                        {rows.map((row) => (
                                                             <TableRow key={row.id}>
                                                                 <TableCell className="text-sm">{row.name}</TableCell>
+                                                                <TableCell>
+                                                                    <Select
+                                                                        value={String(row.statusId)}
+                                                                        onValueChange={(v) =>
+                                                                            row.sigId != null
+                                                                                ? handleRowStatusChange(row.sigId, Number(v))
+                                                                                : updateRowStatus(row.id, Number(v))
+                                                                        }
+                                                                        disabled={row.sigId != null && updatingSigId === row.sigId}
+                                                                    >
+                                                                        <SelectTrigger className="h-8 w-full text-xs">
+                                                                            {row.sigId != null && updatingSigId === row.sigId ? (
+                                                                                <Loader2 className="h-3 w-3 animate-spin" />
+                                                                            ) : (
+                                                                                <SelectValue />
+                                                                            )}
+                                                                        </SelectTrigger>
+                                                                        <SelectContent>
+                                                                            {sigStatusOptions.map((s) => (
+                                                                                <SelectItem key={s.id} value={String(s.id)} className="text-xs">
+                                                                                    {s.statusType}
+                                                                                </SelectItem>
+                                                                            ))}
+                                                                        </SelectContent>
+                                                                    </Select>
+                                                                </TableCell>
                                                                 <TableCell className="text-center">
                                                                     <Input
                                                                         type="number"
                                                                         min={1}
                                                                         value={row.numSignatures}
-                                                                        onChange={(e) => updatePendingCount(row.id, Math.max(1, Number(e.target.value) || 1))}
+                                                                        onChange={(e) => updateRowCount(row.id, Math.max(1, Number(e.target.value) || 1))}
                                                                         className="h-8 w-14 text-center mx-auto"
                                                                     />
                                                                 </TableCell>
@@ -1053,12 +1101,12 @@ function AdminDocumentViewDialog({
                                                                         type="number"
                                                                         min={1}
                                                                         value={row.order}
-                                                                        onChange={(e) => updatePendingOrder(row.id, Math.max(1, Number(e.target.value) || 1))}
+                                                                        onChange={(e) => updateRowOrder(row.id, Math.max(1, Number(e.target.value) || 1))}
                                                                         className="h-8 w-14 text-center mx-auto"
                                                                     />
                                                                 </TableCell>
                                                                 <TableCell className="text-center">
-                                                                    <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={() => removePending(row.id)}>
+                                                                    <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={() => removeRow(row.id)}>
                                                                         <Trash2 className="h-3.5 w-3.5 text-destructive" />
                                                                     </Button>
                                                                 </TableCell>
@@ -1070,6 +1118,40 @@ function AdminDocumentViewDialog({
                                         </div>
                                     )}
                                 </div>
+
+                                <Collapsible open={auditOpen} onOpenChange={setAuditOpen}>
+                                    <CollapsibleTrigger className="flex w-full items-center gap-2 text-sm font-semibold">
+                                        History
+                                        <ChevronDown className="h-4 w-4 text-muted-foreground ml-auto transition-transform data-[state=open]:rotate-180" />
+                                    </CollapsibleTrigger>
+                                    <CollapsibleContent className="pt-2">
+                                        {auditLoading ? (
+                                            <Skeleton className="h-16 w-full" />
+                                        ) : auditError ? (
+                                            <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+                                                <span>{auditError}</span>
+                                                <Button size="sm" variant="outline" onClick={() => setAuditReloadToken((c) => c + 1)}>Retry</Button>
+                                            </div>
+                                        ) : auditRows.length === 0 ? (
+                                            <p className="text-xs text-muted-foreground">No admin changes recorded for this document.</p>
+                                        ) : (
+                                            <div className="rounded-lg border divide-y max-h-64 overflow-y-auto">
+                                                {auditRows.map((a) => (
+                                                    <div key={a.id} className="px-3 py-2 text-xs space-y-0.5">
+                                                        <div className="flex items-center justify-between">
+                                                            <span className="font-medium">{a.action}</span>
+                                                            <span className="text-muted-foreground">{formatAuditTimestamp(a.changedAt)}</span>
+                                                        </div>
+                                                        <div className="text-muted-foreground">
+                                                            by {a.changedByName || a.changedByEid}
+                                                            {a.sigId != null ? ` — sig #${a.sigId}` : ""}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </CollapsibleContent>
+                                </Collapsible>
                             </div>
                         )}
                     </div>
@@ -1101,7 +1183,7 @@ function AdminDocumentViewDialog({
                     <Button variant="outline" onClick={onClose} disabled={saving}>
                         Close
                     </Button>
-                    <Button onClick={handleSave} disabled={saving || loading} className="gap-1.5">
+                    <Button onClick={handleSave} disabled={saving || loading || loadError} className="gap-1.5">
                         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                         Save Changes
                     </Button>
