@@ -126,6 +126,18 @@ interface SignatoryRow {
     level: number
 }
 
+interface AdminSignatoryAuditRow {
+    id: number
+    docId: number
+    sigId: number | null
+    action: string
+    changedByEid: string
+    changedByName: string | null
+    signatorySnapshot: string | null
+    locationSnapshot: string | null
+    changedAt: string
+}
+
 // doc_status_id values GetPdfDigitalOnlyAsync serves watermarked, and
 // ReconstructSignedPdfAsync refuses outright — mirrors
 // SigningService.NonReconstructableStatuses.
@@ -631,6 +643,12 @@ function AdminDocumentViewDialog({
     const [rows, setRows] = React.useState<SignatoryRow[]>([])
     const [selectedIds, setSelectedIds] = React.useState<(string | number)[]>([])
 
+    const [auditRows, setAuditRows] = React.useState<AdminSignatoryAuditRow[]>([])
+    const [auditLoading, setAuditLoading] = React.useState(false)
+    const [auditError, setAuditError] = React.useState<string | null>(null)
+    const [auditOpen, setAuditOpen] = React.useState(false)
+    const [auditReloadToken, setAuditReloadToken] = React.useState(0)
+
     const [sigStatusOptions, setSigStatusOptions] = React.useState<DocStatusOption[]>([])
     const [updatingSigId, setUpdatingSigId] = React.useState<number | null>(null)
 
@@ -688,6 +706,28 @@ function AdminDocumentViewDialog({
             })()
         return () => { cancelled = true }
     }, [doc])
+
+    React.useEffect(() => {
+        if (!doc) {
+            setAuditRows([])
+            setAuditError(null)
+            return
+        }
+        let cancelled = false
+        setAuditLoading(true)
+        setAuditError(null)
+        authFetch(apiUrl(`DGSign/admin_get_signatory_audit?docId=${doc.docId}`))
+            .then((res: Response) => {
+                if (!res.ok) throw new Error(`Failed to load history (${res.status})`)
+                return res.json()
+            })
+            .then((data: AdminSignatoryAuditRow[]) => { if (!cancelled) setAuditRows(data ?? []) })
+            .catch((err: unknown) => {
+                if (!cancelled) setAuditError(err instanceof Error ? err.message : "Failed to load history")
+            })
+            .finally(() => { if (!cancelled) setAuditLoading(false) })
+        return () => { cancelled = true }
+    }, [doc, auditReloadToken])
 
     // PDF preview
     React.useEffect(() => {
@@ -1059,6 +1099,40 @@ function AdminDocumentViewDialog({
                                         </div>
                                     )}
                                 </div>
+
+                                <Collapsible open={auditOpen} onOpenChange={setAuditOpen}>
+                                    <CollapsibleTrigger className="flex w-full items-center gap-2 text-sm font-semibold">
+                                        History
+                                        <ChevronDown className="h-4 w-4 text-muted-foreground ml-auto transition-transform data-[state=open]:rotate-180" />
+                                    </CollapsibleTrigger>
+                                    <CollapsibleContent className="pt-2">
+                                        {auditLoading ? (
+                                            <Skeleton className="h-16 w-full" />
+                                        ) : auditError ? (
+                                            <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+                                                <span>{auditError}</span>
+                                                <Button size="sm" variant="outline" onClick={() => setAuditReloadToken((c) => c + 1)}>Retry</Button>
+                                            </div>
+                                        ) : auditRows.length === 0 ? (
+                                            <p className="text-xs text-muted-foreground">No admin changes recorded for this document.</p>
+                                        ) : (
+                                            <div className="rounded-lg border divide-y max-h-64 overflow-y-auto">
+                                                {auditRows.map((a) => (
+                                                    <div key={a.id} className="px-3 py-2 text-xs space-y-0.5">
+                                                        <div className="flex items-center justify-between">
+                                                            <span className="font-medium">{a.action}</span>
+                                                            <span className="text-muted-foreground">{a.changedAt}</span>
+                                                        </div>
+                                                        <div className="text-muted-foreground">
+                                                            by {a.changedByName || a.changedByEid}
+                                                            {a.sigId != null ? ` — sig #${a.sigId}` : ""}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </CollapsibleContent>
+                                </Collapsible>
                             </div>
                         )}
                     </div>
