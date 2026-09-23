@@ -367,13 +367,30 @@ namespace DigitalSignature.Models
         public int DocPages { get; set; }
     }
 
-    // admin_update_signatories — unlike UpdateDocumentAsync's wholesale
-    // delete+reinsert, this only ever touches sig_status = 0 (pending) rows;
-    // already-signed rows and their sig_id are never deleted or renumbered.
+    // admin_update_signatories — full per-row diff against the submitted
+    // list: rows missing from the list are deleted, rows present with
+    // changed Status/Order/NumSignatures are updated, rows with SigId ==
+    // null are inserted. Works on already-signed rows too (unlike the
+    // previous pending-only behavior) — every touched row that was signed
+    // gets an admin_signatory_audit snapshot first. See
+    // docs/superpowers/specs/2026-09-23-admin-signatory-audit-design.md.
+    public class AdminSignatoryItemDto
+    {
+        public int? SigId { get; set; }
+        public int Eid { get; set; }
+        public int UserType { get; set; }
+        public int Order { get; set; } = 1;
+        public int NumSignatures { get; set; } = 1;
+        public int? Level { get; set; }
+        public int Status { get; set; }
+        public string? QuerySigned { get; set; }
+        public string? QueryReturn { get; set; }
+    }
+
     public class AdminUpdateSignatoriesRequest
     {
         public int DocId { get; set; }
-        public List<UploadSignatoryItemDto> Signatories { get; set; } = new();
+        public List<AdminSignatoryItemDto> Signatories { get; set; } = new();
     }
 
     public class AdminUpdateSignatoriesResult
@@ -382,6 +399,61 @@ namespace DigitalSignature.Models
         public bool IsServerError { get; set; }
         public string? Message { get; set; }
         public int SignatoryCount { get; set; }
+    }
+
+    // Admin override of one signatory row's sig_status by sig_id — a
+    // direct write, used by the dialog's per-row Select for immediate
+    // apply (order/delete/add go through AdminUpdateSignatoriesAsync's
+    // batch Save instead). Writes one admin_signatory_audit row.
+    public class AdminUpdateSignatoryStatusRequest
+    {
+        public int SigId { get; set; }
+        public int Status { get; set; }
+    }
+
+    public class AdminUpdateSignatoryStatusResult
+    {
+        public bool Success { get; set; }
+        public bool IsServerError { get; set; }
+        public string? Message { get; set; }
+    }
+
+    // Full current document_signatories row — used by
+    // AdminUpdateSignatoriesAsync to diff the submitted list against what's
+    // actually in the database, and to build a signatory_snapshot JSON blob.
+    public class DocumentSignatoryFullRowDto
+    {
+        public int SigId { get; set; }
+        public int DocId { get; set; }
+        public string? SigCode { get; set; }
+        public int SigEid { get; set; }
+        public int SigUserType { get; set; }
+        public int SigStatus { get; set; }
+        public int SigOrder { get; set; }
+        public string? SigRemarks { get; set; }
+        public string? SigQuerySigned { get; set; }
+        public string? SigQueryReturn { get; set; }
+        public int? SigLevel { get; set; }
+        public int SigSignCount { get; set; }
+        public string? SigRemarksDatenTime { get; set; }
+        public string? DateTimeInserted { get; set; }
+    }
+
+    // One row from admin_signatory_audit — a single admin-initiated change
+    // to one signatory. SignatorySnapshot/LocationSnapshot are raw JSON
+    // strings; the frontend parses them for display.
+    public class AdminSignatoryAuditDto
+    {
+        public int Id { get; set; }
+        public int DocId { get; set; }
+        public int? SigId { get; set; }
+        public string Action { get; set; } = "";
+        public string ChangedByEid { get; set; } = "";
+        public string ChangedByUserType { get; set; } = "";
+        public string? ChangedByName { get; set; }
+        public string? SignatorySnapshot { get; set; }
+        public string? LocationSnapshot { get; set; }
+        public DateTime ChangedAt { get; set; }
     }
 
     public class DeleteDocumentResult
