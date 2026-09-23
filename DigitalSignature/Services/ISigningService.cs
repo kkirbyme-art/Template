@@ -78,11 +78,12 @@ public interface ISigningService
     // document's existing directory/name. Never touches document_signatories.
     Task<AdminUpdateDocumentResult> AdminUpdateDocumentAsync(AdminUpdateDocumentRequest request, IFormFile? pdfFile);
 
-    // Admin-only signatory edit — only ever deletes/reinserts sig_status = 0
-    // (pending) rows. Already-signed rows (sig_status = 1) and their sig_id
-    // are always left untouched, so history keyed off sig_id
-    // (document_signature_location etc.) is never orphaned.
-    Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(AdminUpdateSignatoriesRequest request);
+    // Per-row diff against the submitted list — updates/deletes/inserts as
+    // needed, any status (signed rows are no longer protected). Every
+    // touched row that was already signed gets an admin_signatory_audit
+    // snapshot (including its document_signature_location rows) before
+    // being changed.
+    Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(AdminUpdateSignatoriesRequest request, int actorEid, int actorUserType);
 
     // Supporting documents are independent of the edit lock — always allowed.
     Task<AddSupportingFileResult> AddSupportingFileAsync(int docId, int eid, IFormFile file);

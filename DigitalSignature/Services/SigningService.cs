@@ -2676,10 +2676,60 @@ public class SigningService : ISigningService
         }
     }
 
-    // Admin-only signatory edit — only ever deletes/reinserts sig_status = 0
-    // (pending) rows so already-signed rows (and the sig_id history keyed
-    // off them) are never touched. See ISigningService for the full rationale.
-    public async Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(AdminUpdateSignatoriesRequest request)
+    // Snapshots one document_signatories row (and, if it's signed, its
+    // document_signature_location rows) into admin_signatory_audit, before
+    // the caller applies whatever change prompted the write. Must run
+    // inside the same transaction as that change.
+    private async Task WriteSignatoryAuditAsync(
+        IDbTransaction tx,
+        int docId,
+        int? sigId,
+        string action,
+        int actorEid,
+        int actorUserType,
+        string? actorName,
+        DocumentSignatoryFullRowDto? signatoryRow,
+        bool includeLocation)
+    {
+        string? locationSnapshot = null;
+        if (includeLocation && sigId.HasValue)
+        {
+            var locationRows = (await _dbService.QueryAsync<dynamic, dynamic>(
+                "SELECT * FROM bacpdfsign.dbo.document_signature_location WHERE sig_id = @SigId",
+                new { SigId = sigId.Value },
+                CommandType.Text)).ToList();
+            if (locationRows.Count > 0)
+                locationSnapshot = System.Text.Json.JsonSerializer.Serialize(locationRows);
+        }
+
+        await _dbService.ExecuteAsync<dynamic>(
+            @"INSERT INTO bacpdfsign.dbo.admin_signatory_audit
+                (doc_id, sig_id, action, changed_by_eid, changed_by_user_type, changed_by_name,
+                 signatory_snapshot, location_snapshot, changed_at)
+              VALUES
+                (@DocId, @SigId, @Action, @ActorEid, @ActorUserType, @ActorName,
+                 @SignatorySnapshot, @LocationSnapshot, GETDATE());",
+            new
+            {
+                DocId = docId,
+                SigId = (object?)sigId ?? DBNull.Value,
+                Action = action,
+                ActorEid = actorEid.ToString(),
+                ActorUserType = actorUserType.ToString(),
+                ActorName = (object?)actorName ?? DBNull.Value,
+                SignatorySnapshot = signatoryRow != null
+                    ? System.Text.Json.JsonSerializer.Serialize(signatoryRow)
+                    : (object)DBNull.Value,
+                LocationSnapshot = (object?)locationSnapshot ?? DBNull.Value
+            },
+            CommandType.Text,
+            tx);
+    }
+
+    // Admin-only signatory edit — full per-row diff against the submitted
+    // list. See docs/superpowers/specs/2026-09-23-admin-signatory-audit-design.md.
+    public async Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(
+        AdminUpdateSignatoriesRequest request, int actorEid, int actorUserType)
     {
         try
         {
@@ -2690,57 +2740,105 @@ public class SigningService : ISigningService
             if (doc == null)
                 return new AdminUpdateSignatoriesResult { Success = false, Message = "Document not found." };
 
-            var maxSignedOrder = await _dbService.ExecuteScalarAsync<int, dynamic>(
-                @"SELECT ISNULL(MAX(sig_order), 0) FROM bacpdfsign.dbo.document_signatories
-                  WHERE doc_id = @DocId AND sig_status = 1",
-                new { request.DocId },
+            var actorName = await _dbService.QueryFirstOrDefaultAsync<string, dynamic>(
+                "SELECT TOP 1 fname FROM bacpdfsign.dbo.signatory_names WHERE eid = @Eid AND user_type = @UserType",
+                new { Eid = actorEid, UserType = actorUserType },
                 CommandType.Text);
 
-            if (request.Signatories.Any(s => s.Order > 0 && s.Order <= maxSignedOrder))
-            {
-                return new AdminUpdateSignatoriesResult
-                {
-                    Success = false,
-                    Message = $"Signatory order must be greater than {maxSignedOrder} — earlier steps are already signed."
-                };
-            }
+            var currentRows = (await _dbService.QueryAsync<DocumentSignatoryFullRowDto, dynamic>(
+                @"SELECT sig_id AS SigId, doc_id AS DocId, sig_code AS SigCode, sig_eid AS SigEid,
+                         sig_user_type AS SigUserType, sig_status AS SigStatus, sig_order AS SigOrder,
+                         sig_remarks AS SigRemarks, sig_query_signed AS SigQuerySigned, sig_query_return AS SigQueryReturn,
+                         sig_level AS SigLevel, sig_sign_count AS SigSignCount,
+                         sig_remarks_datenTime AS SigRemarksDatenTime, date_time_inserted AS DateTimeInserted
+                  FROM bacpdfsign.dbo.document_signatories
+                  WHERE doc_id = @DocId",
+                new { request.DocId },
+                CommandType.Text)).ToDictionary(r => r.SigId);
+
+            var submittedSigIds = request.Signatories.Where(s => s.SigId.HasValue).Select(s => s.SigId!.Value).ToHashSet();
+            var toDelete = currentRows.Keys.Where(sigId => !submittedSigIds.Contains(sigId)).ToList();
 
             var tx = await _dbService.BeginTransactionAsync();
             try
             {
-                await _dbService.ExecuteAsync<dynamic>(
-                    "DELETE FROM bacpdfsign.dbo.document_signatories WHERE doc_id = @DocId AND sig_status = 0",
-                    new { request.DocId },
-                    CommandType.Text,
-                    tx);
+                foreach (var sigId in toDelete)
+                {
+                    var row = currentRows[sigId];
+                    await WriteSignatoryAuditAsync(tx, request.DocId, sigId, "delete",
+                        actorEid, actorUserType, actorName, row, includeLocation: row.SigStatus == 1);
+                    await _dbService.ExecuteAsync<dynamic>(
+                        "DELETE FROM bacpdfsign.dbo.document_signatories WHERE sig_id = @SigId",
+                        new { SigId = sigId }, CommandType.Text, tx);
+                }
 
-                var order = maxSignedOrder + 1;
                 foreach (var sig in request.Signatories)
                 {
-                    await _dbService.ExecuteAsync<dynamic>(
-                        @"INSERT INTO bacpdfsign.dbo.document_signatories
-                            (doc_id, sig_code, sig_eid, sig_status, sig_order, sig_remarks,
-                             sig_query_signed, sig_query_return, sig_user_type, sig_level,
-                             sig_sign_count, sig_remarks_datenTime, date_time_inserted)
-                          VALUES
-                            (@DocId, @SigCode, @SigEid, 0, @SigOrder, '',
-                             @QuerySigned, @QueryReturn, @SigUserType, @SigLevel,
-                             @SigSignCount, '', CONVERT(NVARCHAR(50), GETDATE(), 100));",
-                        new
+                    if (sig.SigId.HasValue && currentRows.TryGetValue(sig.SigId.Value, out var existing))
+                    {
+                        var statusChanged = existing.SigStatus != sig.Status;
+                        var orderChanged = existing.SigOrder != sig.Order;
+                        var countChanged = existing.SigSignCount != sig.NumSignatures;
+                        if (!statusChanged && !orderChanged && !countChanged)
+                            continue;
+
+                        var wasSigned = existing.SigStatus == 1;
+                        if (statusChanged)
+                            await WriteSignatoryAuditAsync(tx, request.DocId, sig.SigId, "status_change",
+                                actorEid, actorUserType, actorName, existing, includeLocation: wasSigned);
+                        if (orderChanged)
+                            await WriteSignatoryAuditAsync(tx, request.DocId, sig.SigId, "order_change",
+                                actorEid, actorUserType, actorName, existing, includeLocation: wasSigned);
+
+                        await _dbService.ExecuteAsync<dynamic>(
+                            @"UPDATE bacpdfsign.dbo.document_signatories
+                              SET sig_status = @Status, sig_order = @Order, sig_sign_count = @SigSignCount
+                              WHERE sig_id = @SigId",
+                            new { sig.Status, sig.Order, SigSignCount = sig.NumSignatures, SigId = sig.SigId },
+                            CommandType.Text, tx);
+                    }
+                    else
+                    {
+                        var insertedId = await _dbService.ExecuteScalarAsync<int, dynamic>(
+                            @"INSERT INTO bacpdfsign.dbo.document_signatories
+                                (doc_id, sig_code, sig_eid, sig_status, sig_order, sig_remarks,
+                                 sig_query_signed, sig_query_return, sig_user_type, sig_level,
+                                 sig_sign_count, sig_remarks_datenTime, date_time_inserted)
+                              VALUES
+                                (@DocId, @SigCode, @SigEid, @Status, @SigOrder, '',
+                                 @QuerySigned, @QueryReturn, @SigUserType, @SigLevel,
+                                 @SigSignCount, '', CONVERT(NVARCHAR(50), GETDATE(), 100));
+                              SELECT CAST(SCOPE_IDENTITY() AS INT);",
+                            new
+                            {
+                                request.DocId,
+                                SigCode = doc.DocCode,
+                                SigEid = sig.Eid,
+                                sig.Status,
+                                SigOrder = sig.Order,
+                                QuerySigned = (object?)sig.QuerySigned ?? DBNull.Value,
+                                QueryReturn = (object?)sig.QueryReturn ?? DBNull.Value,
+                                SigUserType = sig.UserType,
+                                SigLevel = NormalizeSigLevel(sig.Level),
+                                SigSignCount = sig.NumSignatures > 0 ? sig.NumSignatures : 1
+                            },
+                            CommandType.Text, tx);
+
+                        var inserted = new DocumentSignatoryFullRowDto
                         {
-                            request.DocId,
+                            SigId = insertedId,
+                            DocId = request.DocId,
                             SigCode = doc.DocCode,
                             SigEid = sig.Eid,
-                            SigOrder = sig.Order > 0 ? sig.Order : order,
-                            QuerySigned = (object?)sig.QuerySigned ?? DBNull.Value,
-                            QueryReturn = (object?)sig.QueryReturn ?? DBNull.Value,
                             SigUserType = sig.UserType,
+                            SigStatus = sig.Status,
+                            SigOrder = sig.Order,
                             SigLevel = NormalizeSigLevel(sig.Level),
                             SigSignCount = sig.NumSignatures > 0 ? sig.NumSignatures : 1
-                        },
-                        CommandType.Text,
-                        tx);
-                    order++;
+                        };
+                        await WriteSignatoryAuditAsync(tx, request.DocId, insertedId, "add",
+                            actorEid, actorUserType, actorName, inserted, includeLocation: false);
+                    }
                 }
 
                 await _dbService.CommitTransactionAsync(tx);
