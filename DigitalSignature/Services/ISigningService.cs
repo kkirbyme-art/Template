@@ -85,6 +85,12 @@ public interface ISigningService
     // being changed.
     Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(AdminUpdateSignatoriesRequest request, int actorEid, int actorUserType);
 
+    // Admin override of a single signatory row's sig_status by sig_id —
+    // works on already-signed rows too (unlike AdminUpdateSignatoriesAsync).
+    // Just flips the status value; does not touch document_signature_location
+    // or re-run any of the notification/routing side effects a real sign does.
+    Task<AdminUpdateSignatoryStatusResult> AdminUpdateSignatoryStatusAsync(AdminUpdateSignatoryStatusRequest request, int actorEid, int actorUserType);
+
     // Supporting documents are independent of the edit lock — always allowed.
     Task<AddSupportingFileResult> AddSupportingFileAsync(int docId, int eid, IFormFile file);
 

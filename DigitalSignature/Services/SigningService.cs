@@ -2857,6 +2857,62 @@ public class SigningService : ISigningService
         }
     }
 
+    public async Task<AdminUpdateSignatoryStatusResult> AdminUpdateSignatoryStatusAsync(
+        AdminUpdateSignatoryStatusRequest request, int actorEid, int actorUserType)
+    {
+        try
+        {
+            var existing = await _dbService.QueryFirstOrDefaultAsync<DocumentSignatoryFullRowDto, dynamic>(
+                @"SELECT sig_id AS SigId, doc_id AS DocId, sig_code AS SigCode, sig_eid AS SigEid,
+                         sig_user_type AS SigUserType, sig_status AS SigStatus, sig_order AS SigOrder,
+                         sig_remarks AS SigRemarks, sig_query_signed AS SigQuerySigned, sig_query_return AS SigQueryReturn,
+                         sig_level AS SigLevel, sig_sign_count AS SigSignCount,
+                         sig_remarks_datenTime AS SigRemarksDatenTime, date_time_inserted AS DateTimeInserted
+                  FROM bacpdfsign.dbo.document_signatories
+                  WHERE sig_id = @SigId",
+                new { request.SigId },
+                CommandType.Text);
+            if (existing == null)
+                return new AdminUpdateSignatoryStatusResult { Success = false, Message = "Signatory row not found." };
+
+            var actorName = await _dbService.QueryFirstOrDefaultAsync<string, dynamic>(
+                "SELECT TOP 1 fname FROM bacpdfsign.dbo.signatory_names WHERE eid = @Eid AND user_type = @UserType",
+                new { Eid = actorEid, UserType = actorUserType },
+                CommandType.Text);
+
+            var tx = await _dbService.BeginTransactionAsync();
+            try
+            {
+                await WriteSignatoryAuditAsync(tx, existing.DocId, existing.SigId, "status_change",
+                    actorEid, actorUserType, actorName, existing, includeLocation: existing.SigStatus == 1);
+
+                var affected = await _dbService.ExecuteAsync<dynamic>(
+                    "UPDATE bacpdfsign.dbo.document_signatories SET sig_status = @Status WHERE sig_id = @SigId",
+                    new { request.SigId, request.Status },
+                    CommandType.Text, tx);
+
+                if (affected == 0)
+                {
+                    await _dbService.RollbackTransactionAsync(tx);
+                    return new AdminUpdateSignatoryStatusResult { Success = false, Message = "Signatory row not found." };
+                }
+
+                await _dbService.CommitTransactionAsync(tx);
+                return new AdminUpdateSignatoryStatusResult { Success = true };
+            }
+            catch
+            {
+                try { await _dbService.RollbackTransactionAsync(tx); } catch { /* already rolled back or connection gone */ }
+                throw;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed admin status override for sig {SigId}", request.SigId);
+            return new AdminUpdateSignatoryStatusResult { Success = false, IsServerError = true, Message = "Something went wrong" };
+        }
+    }
+
     public async Task<DeleteDocumentResult> DeleteDocumentAsync(int docId)
     {
         try
