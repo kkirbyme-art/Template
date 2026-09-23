@@ -2694,8 +2694,16 @@ public class SigningService : ISigningService
         string? locationSnapshot = null;
         if (includeLocation && sigId.HasValue)
         {
+            // Explicit column list, NOT SELECT * — sign_passwod holds the signer's
+            // PFX certificate password and pfx_id points at the certificate itself,
+            // so neither may ever be copied into an audit snapshot. sign_image is
+            // always written as '' by the signing path, so it carries no value either.
             var locationRows = (await _dbService.QueryAsync<dynamic, dynamic>(
-                "SELECT * FROM bacpdfsign.dbo.document_signature_location WHERE sig_id = @SigId",
+                @"SELECT sig_id, sign_device_name, sign_address, sign_latitude, sign_longitude,
+                         sign_accuracy, sign_x, sign_y, sign_page, sign_type, sign_datetime,
+                         sign_method, sign_is_alternate_signature
+                  FROM bacpdfsign.dbo.document_signature_location
+                  WHERE sig_id = @SigId",
                 new { SigId = sigId.Value },
                 CommandType.Text)).ToList();
             if (locationRows.Count > 0)
@@ -2737,7 +2745,9 @@ public class SigningService : ISigningService
                      location_snapshot AS LocationSnapshot, changed_at AS ChangedAt
               FROM bacpdfsign.dbo.admin_signatory_audit
               WHERE doc_id = @DocId
-              ORDER BY changed_at DESC",
+              -- id DESC breaks ties: changed_at is DATETIME (~3ms resolution), so
+              -- several audit rows written by one Save can share a timestamp.
+              ORDER BY changed_at DESC, id DESC",
             new { DocId = docId },
             CommandType.Text);
         return rows.ToList();
@@ -2774,6 +2784,21 @@ public class SigningService : ISigningService
                 CommandType.Text)).ToDictionary(r => r.SigId);
 
             var submittedSigIds = request.Signatories.Where(s => s.SigId.HasValue).Select(s => s.SigId!.Value).ToHashSet();
+
+            // Any submitted SigId that isn't one of this document's own rows means the
+            // payload is stale or belongs to another document (e.g. a dialog that failed
+            // to reload between documents). Falling through would silently re-insert those
+            // rows onto this document while deleting its real ones — refuse instead.
+            // An empty Signatories list is still allowed: removing every signatory is a
+            // legitimate admin action.
+            var foreignSigIds = submittedSigIds.Where(id => !currentRows.ContainsKey(id)).ToList();
+            if (foreignSigIds.Count > 0)
+                return new AdminUpdateSignatoriesResult
+                {
+                    Success = false,
+                    Message = "One or more signatories do not belong to this document. Reload the document and try again."
+                };
+
             var toDelete = currentRows.Keys.Where(sigId => !submittedSigIds.Contains(sigId)).ToList();
 
             var tx = await _dbService.BeginTransactionAsync();
@@ -2793,25 +2818,33 @@ public class SigningService : ISigningService
                 {
                     if (sig.SigId.HasValue && currentRows.TryGetValue(sig.SigId.Value, out var existing))
                     {
-                        var statusChanged = existing.SigStatus != sig.Status;
+                        // sig_status is deliberately NOT touched here. The dialog already
+                        // applies status per row through admin_update_signatory_status the
+                        // moment it changes, so the Status carried in this batch payload is
+                        // only ever a stale copy — writing it back would silently revert a
+                        // signature that landed while the dialog was open (and audit it as
+                        // if the admin had done it on purpose). Existing rows' status flows
+                        // through the dedicated PATCH endpoint only; brand-new rows still
+                        // get their status from the INSERT below.
+                        var newCount = sig.NumSignatures > 0 ? sig.NumSignatures : 1;
                         var orderChanged = existing.SigOrder != sig.Order;
-                        var countChanged = existing.SigSignCount != sig.NumSignatures;
-                        if (!statusChanged && !orderChanged && !countChanged)
+                        var countChanged = existing.SigSignCount != newCount;
+                        if (!orderChanged && !countChanged)
                             continue;
 
-                        var wasSigned = existing.SigStatus == 1;
-                        if (statusChanged)
-                            await WriteSignatoryAuditAsync(tx, request.DocId, sig.SigId, "status_change",
-                                actorEid, actorUserType, actorName, existing, includeLocation: wasSigned);
-                        if (orderChanged)
-                            await WriteSignatoryAuditAsync(tx, request.DocId, sig.SigId, "order_change",
-                                actorEid, actorUserType, actorName, existing, includeLocation: wasSigned);
+                        // Exactly one audit row per row actually written. "order_change"
+                        // covers order (with or without a count change alongside it);
+                        // "count_change" is used when only sig_sign_count moved.
+                        await WriteSignatoryAuditAsync(tx, request.DocId, sig.SigId,
+                            orderChanged ? "order_change" : "count_change",
+                            actorEid, actorUserType, actorName, existing,
+                            includeLocation: existing.SigStatus == 1);
 
                         await _dbService.ExecuteAsync<dynamic>(
                             @"UPDATE bacpdfsign.dbo.document_signatories
-                              SET sig_status = @Status, sig_order = @Order, sig_sign_count = @SigSignCount
+                              SET sig_order = @Order, sig_sign_count = @SigSignCount
                               WHERE sig_id = @SigId",
-                            new { sig.Status, sig.Order, SigSignCount = sig.NumSignatures, SigId = sig.SigId },
+                            new { sig.Order, SigSignCount = newCount, SigId = sig.SigId },
                             CommandType.Text, tx);
                     }
                     else

@@ -126,16 +126,25 @@ interface SignatoryRow {
     level: number
 }
 
+// Mirrors what admin_get_signatory_audit returns. The server deliberately
+// withholds signatory_snapshot/location_snapshot (they describe a signer's
+// stored row and stay server-side for forensics), so they are absent here.
 interface AdminSignatoryAuditRow {
     id: number
     docId: number
     sigId: number | null
     action: string
     changedByEid: string
+    changedByUserType: string
     changedByName: string | null
-    signatorySnapshot: string | null
-    locationSnapshot: string | null
     changedAt: string
+}
+
+// changedAt arrives as a serialized DateTime (e.g. "2026-09-23T14:05:11").
+// Fall back to the raw string if it doesn't parse rather than showing "Invalid Date".
+function formatAuditTimestamp(value: string): string {
+    const d = new Date(value)
+    return Number.isNaN(d.getTime()) ? value : d.toLocaleString()
 }
 
 // doc_status_id values GetPdfDigitalOnlyAsync serves watermarked, and
@@ -642,6 +651,10 @@ function AdminDocumentViewDialog({
 
     const [rows, setRows] = React.useState<SignatoryRow[]>([])
     const [selectedIds, setSelectedIds] = React.useState<(string | number)[]>([])
+    // Set when get_document_for_edit fails. Saving on a failed load would submit
+    // an empty/stale signatory list, which the backend reads as "delete every
+    // signatory on this document" — so Save stays disabled until a load succeeds.
+    const [loadError, setLoadError] = React.useState(false)
 
     const [auditRows, setAuditRows] = React.useState<AdminSignatoryAuditRow[]>([])
     const [auditLoading, setAuditLoading] = React.useState(false)
@@ -675,6 +688,11 @@ function AdminDocumentViewDialog({
         setStatusId(String(doc.docStatusId ?? ""))
         setTypeId(doc.docTypeId != null ? String(doc.docTypeId) : "")
         setPdfFile(null)
+        // Clear the previous document's signatories up front — otherwise a failed
+        // load below would leave doc A's rows on screen while Save targets doc B.
+        setRows([])
+        setSelectedIds([])
+        setLoadError(false)
 
             ; (async () => {
                 setLoading(true)
@@ -699,6 +717,7 @@ function AdminDocumentViewDialog({
                     setRows(mapped)
                     setSelectedIds(mapped.map((r) => r.id))
                 } catch {
+                    if (!cancelled) setLoadError(true)
                     toast.error("Failed to load document details.")
                 } finally {
                     if (!cancelled) setLoading(false)
@@ -1121,7 +1140,7 @@ function AdminDocumentViewDialog({
                                                     <div key={a.id} className="px-3 py-2 text-xs space-y-0.5">
                                                         <div className="flex items-center justify-between">
                                                             <span className="font-medium">{a.action}</span>
-                                                            <span className="text-muted-foreground">{a.changedAt}</span>
+                                                            <span className="text-muted-foreground">{formatAuditTimestamp(a.changedAt)}</span>
                                                         </div>
                                                         <div className="text-muted-foreground">
                                                             by {a.changedByName || a.changedByEid}
@@ -1164,7 +1183,7 @@ function AdminDocumentViewDialog({
                     <Button variant="outline" onClick={onClose} disabled={saving}>
                         Close
                     </Button>
-                    <Button onClick={handleSave} disabled={saving || loading} className="gap-1.5">
+                    <Button onClick={handleSave} disabled={saving || loading || loadError} className="gap-1.5">
                         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                         Save Changes
                     </Button>

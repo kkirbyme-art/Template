@@ -6,13 +6,14 @@
 -- admin-initiated status/order/delete/add on a signatory writes one row
 -- here, capturing who did it and a before-the-change snapshot of the
 -- document_signatories row (and, if it was already signed, its
--- document_signature_location rows too).
+-- document_signature_location rows too — minus sign_passwod/pfx_id, which
+-- are the signer's certificate credentials and are never snapshotted).
 
 CREATE TABLE [bacpdfsign].[dbo].[admin_signatory_audit] (
     id                    INT IDENTITY(1,1) PRIMARY KEY,
     doc_id                INT           NOT NULL,
-    sig_id                INT           NULL,   -- NULL on 'add': row didn't exist before this action
-    action                NVARCHAR(20)  NOT NULL, -- 'status_change' | 'order_change' | 'delete' | 'add'
+    sig_id                INT           NULL,   -- always set once the row exists (the 'add' path writes the new id); NULL only if a write ever races an in-flight insert
+    action                NVARCHAR(20)  NOT NULL, -- 'status_change' | 'order_change' | 'count_change' | 'delete' | 'add'
     changed_by_eid        NVARCHAR(20)  NOT NULL,
     changed_by_user_type  NVARCHAR(10)  NOT NULL,
     changed_by_name       NVARCHAR(200) NULL,

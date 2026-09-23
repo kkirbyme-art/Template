@@ -717,8 +717,14 @@ namespace DigitalSignature.Controllers
             return Ok(new { success = true, docId = result.DocId, docPages = result.DocPages });
         }
 
-        // Admin-only signatory edit — only ever touches pending (sig_status =
-        // 0) rows; already-signed rows are always preserved untouched.
+        // Admin-only signatory edit — a full per-row diff of the submitted list
+        // against what the document currently has, regardless of sig_status:
+        // rows missing from the list are DELETED (already-signed rows included),
+        // rows present with a changed order/count are updated, and rows with no
+        // SigId are inserted. It does not write sig_status on existing rows —
+        // that goes through admin_update_signatory_status below. Every row it
+        // deletes, updates or inserts writes an admin_signatory_audit row
+        // recording the actor and a before-the-change snapshot.
         [HttpPost("admin_update_signatories")]
         public async Task<IActionResult> AdminUpdateSignatories([FromBody] AdminUpdateSignatoriesRequest request)
         {
@@ -737,8 +743,11 @@ namespace DigitalSignature.Controllers
             return Ok(new { success = true, signatoryCount = result.SignatoryCount });
         }
 
-        // Admin override of a single signatory row's status — works on
-        // already-signed rows too, unlike admin_update_signatories above.
+        // Admin override of a single signatory row's sig_status, applied
+        // immediately by sig_id — the only path that writes sig_status on an
+        // existing row (admin_update_signatories above handles order/count/
+        // delete/add). Works on already-signed rows, and writes one
+        // admin_signatory_audit row with the pre-change snapshot.
         [HttpPost("admin_update_signatory_status")]
         public async Task<IActionResult> AdminUpdateSignatoryStatus([FromBody] AdminUpdateSignatoryStatusRequest request)
         {
@@ -759,14 +768,36 @@ namespace DigitalSignature.Controllers
 
         // Read-only history for the Document Search dialog's audit panel —
         // every admin-initiated signatory change on this document.
+        // Deliberately projects a narrower shape than AdminSignatoryAuditDto:
+        // signatory_snapshot/location_snapshot stay server-side for forensics
+        // and are never sent to the browser (the panel doesn't render them).
         [HttpGet("admin_get_signatory_audit")]
         public async Task<IActionResult> AdminGetSignatoryAudit([FromQuery] int docId)
         {
             if (!await IsCurrentUserAdminAsync())
                 return Forbid();
 
-            var rows = await _signingService.GetAdminSignatoryAuditAsync(docId);
-            return Ok(rows);
+            try
+            {
+                var rows = await _signingService.GetAdminSignatoryAuditAsync(docId);
+                return Ok(rows.Select(r => new
+                {
+                    id = r.Id,
+                    docId = r.DocId,
+                    sigId = r.SigId,
+                    action = r.Action,
+                    changedByEid = r.ChangedByEid,
+                    changedByUserType = r.ChangedByUserType,
+                    changedByName = r.ChangedByName,
+                    changedAt = r.ChangedAt
+                }).ToList());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to load signatory audit for document {DocId}", docId);
+                return StatusCode((int)HttpStatusCode.InternalServerError,
+                    new { success = false, message = "Something went wrong" });
+            }
         }
 
         // ==================== ADD SUPPORTING DOCUMENT ====================

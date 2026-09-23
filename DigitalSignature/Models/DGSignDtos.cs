@@ -368,11 +368,13 @@ namespace DigitalSignature.Models
     }
 
     // admin_update_signatories — full per-row diff against the submitted
-    // list: rows missing from the list are deleted, rows present with
-    // changed Status/Order/NumSignatures are updated, rows with SigId ==
-    // null are inserted. Works on already-signed rows too (unlike the
-    // previous pending-only behavior) — every touched row that was signed
-    // gets an admin_signatory_audit snapshot first. See
+    // list: rows missing from the list are deleted, rows present with a
+    // changed Order/NumSignatures are updated, rows with SigId == null are
+    // inserted. Works on already-signed rows too (unlike the previous
+    // pending-only behavior) — every touched row gets an
+    // admin_signatory_audit snapshot first. Status is only honored on
+    // inserts; an existing row's sig_status is changed exclusively through
+    // admin_update_signatory_status. See
     // docs/superpowers/specs/2026-09-23-admin-signatory-audit-design.md.
     public class AdminSignatoryItemDto
     {
@@ -441,7 +443,10 @@ namespace DigitalSignature.Models
 
     // One row from admin_signatory_audit — a single admin-initiated change
     // to one signatory. SignatorySnapshot/LocationSnapshot are raw JSON
-    // strings; the frontend parses them for display.
+    // strings kept for server-side forensics only; the
+    // admin_get_signatory_audit endpoint projects them out before responding
+    // and must keep doing so (they describe a signer's stored row, not
+    // something the dialog renders).
     public class AdminSignatoryAuditDto
     {
         public int Id { get; set; }
