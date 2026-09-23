@@ -18,6 +18,8 @@ public class SigningService : ISigningService
     private readonly IDatabaseService _dbService;
     private readonly ISecureCredentialService _credentialService;
     private readonly IFileStorageService _fileStorage;
+    private readonly IEpsSmsService _epsSmsService;
+    private readonly IDocumentRoutingNotifier _routingNotifier;
     private readonly ILogger<SigningService> _logger;
     private readonly IWebHostEnvironment _env;
 
@@ -29,12 +31,16 @@ public class SigningService : ISigningService
         IDatabaseService dbService,
         ISecureCredentialService credentialService,
         IFileStorageService fileStorage,
+        IEpsSmsService epsSmsService,
+        IDocumentRoutingNotifier routingNotifier,
         ILogger<SigningService> logger,
         IWebHostEnvironment env)
     {
         _dbService = dbService;
         _credentialService = credentialService;
         _fileStorage = fileStorage;
+        _epsSmsService = epsSmsService;
+        _routingNotifier = routingNotifier;
         _logger = logger;
         _env = env;
     }
@@ -1588,65 +1594,12 @@ public class SigningService : ISigningService
                 return new SaveSignatureResult { Success = false, Message = "Something went wrong" };
             }
 
-            // 10. Save signed PDF to NAS with retry
-            try
+            // 10. Save signed PDF via the shared storage routine (also used by
+            // ReconstructSignedPdfAsync below).
+            if (!await SaveSignedPdfAsync(pdfdoc, request.DocId))
             {
-                var yearFolder = (DateTime.Now.Year % 100).ToString();
-                var targetDir = Path.Combine(DigitalSignaturePath, yearFolder, $"Form{request.DocId}");
-                var destFile = Path.Combine(targetDir, "file.pdf");
-                const int maxRetries = 3;
-                const int delayMs = 2000;
-
-                using (_fileStorage.Connect(DigitalSignaturePath))
-                {
-                    var saved = false;
-                    var attempt = 0;
-
-                    if (_fileStorage.Mode == "S3")
-                    {
-                        using var ms = new MemoryStream();
-                        pdfdoc.SaveToStream(ms);
-                        await _fileStorage.WriteFileAsync(destFile, ms.ToArray());
-                        saved = true;
-                    }
-                    else
-                    {
-                        if (!Directory.Exists(targetDir))
-                            Directory.CreateDirectory(targetDir);
-
-                        while (!saved && attempt < maxRetries)
-                        {
-                            try
-                            {
-                                attempt++;
-                                var tempFile = Path.Combine(targetDir, $"temp_{Guid.NewGuid()}.pdf");
-                                pdfdoc.SaveToFile(tempFile);
-
-                                if (System.IO.File.Exists(destFile))
-                                    System.IO.File.Delete(destFile);
-
-                                System.IO.File.Move(tempFile, destFile);
-                                saved = true;
-                            }
-                            catch (IOException ioEx) when (attempt < maxRetries)
-                            {
-                                _logger.LogWarning(ioEx, "Retry {Attempt}/{Max} saving PDF to NAS for doc: {DocId}",
-                                    attempt, maxRetries, request.DocId);
-                                await Task.Delay(delayMs);
-                            }
-                        }
-                    }
-
-                    if (!saved)
-                    {
-                        await LogError(eidSignature, eidUtSignature, request.DocId, "Max retries exceeded saving PDF to NAS");
-                        return new SaveSignatureResult { Success = false, Message = "Something went wrong while saving the file to NAS." };
-                    }
-                }
-            }
-            finally
-            {
-                pdfdoc.Close();
+                await LogError(eidSignature, eidUtSignature, request.DocId, "Max retries exceeded saving PDF to NAS");
+                return new SaveSignatureResult { Success = false, Message = "Something went wrong while saving the file to NAS." };
             }
 
             // 11. Execute trigger query (if any)
@@ -1667,6 +1620,37 @@ public class SigningService : ISigningService
                 await LogError(eidSignature, eidUtSignature, request.DocId,
                     ex.Message + "---fail to execute signed query addition");
                 return new SaveSignatureResult { Success = false, Message = "Something went wrong" };
+            }
+
+            // 11b. Post-signing notification — doc_is == 7 (EPS-integrated
+            // document types) gets the EPS SMS gateway; every other type
+            // gets the forward-to-next-signatory / owner-finished flow below.
+            if (docDetails.DocIs == 7)
+            {
+                try
+                {
+                    var smsResult = await _epsSmsService.SendSignatorySmsAsync(
+                        request.DocId.ToString(), request.Eid.ToString(), request.UserType.ToString(), Convert.ToInt32(closingSigId));
+
+                    if (!string.IsNullOrEmpty(smsResult))
+                    {
+                        await LogError(eidSignature, eidUtSignature, request.DocId, "--SMS-failure ni DODONG");
+                        return new SaveSignatureResult { Success = false, Message = smsResult };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await LogError(eidSignature, eidUtSignature, request.DocId, "--SMS-failure ni DODONG");
+                    return new SaveSignatureResult { Success = false, Message = ex.Message };
+                }
+            }
+            else
+            {
+                // Every non-EPS document type: forward to the next signatory
+                // (SMS + email), or notify the owner once nobody's left
+                // pending. Fire-and-forget — a notification failure must not
+                // fail the signing response, the document is already saved.
+                await _routingNotifier.NotifyAsync(docDetails.DocId, docDetails.DocDescription ?? "", docDetails.DocTypeId, nextSignatoryEid, nextSignatoryUserType);
             }
 
             // 12. Return success
@@ -2759,6 +2743,27 @@ public class SigningService : ISigningService
         }
     }
 
+    public async Task<AdminUpdateSignatoryStatusResult> AdminUpdateSignatoryStatusAsync(AdminUpdateSignatoryStatusRequest request)
+    {
+        try
+        {
+            var affected = await _dbService.ExecuteAsync<dynamic>(
+                "UPDATE bacpdfsign.dbo.document_signatories SET sig_status = @Status WHERE sig_id = @SigId",
+                new { request.SigId, request.Status },
+                CommandType.Text);
+
+            if (affected == 0)
+                return new AdminUpdateSignatoryStatusResult { Success = false, Message = "Signatory row not found." };
+
+            return new AdminUpdateSignatoryStatusResult { Success = true };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed admin status override for sig {SigId}", request.SigId);
+            return new AdminUpdateSignatoryStatusResult { Success = false, IsServerError = true, Message = "Something went wrong" };
+        }
+    }
+
     public async Task<DeleteDocumentResult> DeleteDocumentAsync(int docId)
     {
         try
@@ -2978,6 +2983,309 @@ public class SigningService : ISigningService
             if (attempt < maxAttempts) await Task.Delay(delayMs);
         }
         return null;
+    }
+
+    // Live signing (SaveSignatureImageAsync, step 10) — the document is being
+    // signed right now, so "this year"'s folder is correct.
+    private Task<bool> SaveSignedPdfAsync(Spire.Pdf.PdfDocument pdfdoc, string docId)
+    {
+        var yearFolder = (DateTime.Now.Year % 100).ToString();
+        var destFile = Path.Combine(DigitalSignaturePath, yearFolder, $"Form{docId}", "file.pdf");
+        return SaveSignedPdfToPathAsync(pdfdoc, destFile, docId);
+    }
+
+    // Shared by SaveSignatureImageAsync and ReconstructSignedPdfAsync — the
+    // one storage-save routine in this API: S3 writes straight from memory,
+    // Nas/Local/Custom write to a temp file then atomically rename onto
+    // destFile, retrying on IOException. Always closes pdfdoc, even on
+    // failure. Returns false (doesn't throw) if every retry was exhausted —
+    // callers decide how to surface that.
+    //
+    // Takes the destination path directly rather than deriving a year folder
+    // from DateTime.Now — reconstruction saves back to wherever the file
+    // already lives (found via FindSignedPdfPathAsync, which searches by
+    // year), never "today's" folder. A document signed in a prior year must
+    // stay in that year's folder when reconstructed, not get moved.
+    private async Task<bool> SaveSignedPdfToPathAsync(Spire.Pdf.PdfDocument pdfdoc, string destFile, string docId)
+    {
+        try
+        {
+            var targetDir = Path.GetDirectoryName(destFile) ?? DigitalSignaturePath;
+            const int maxRetries = 3;
+            const int delayMs = 2000;
+
+            using (_fileStorage.Connect(DigitalSignaturePath))
+            {
+                if (_fileStorage.Mode == "S3")
+                {
+                    using var ms = new MemoryStream();
+                    pdfdoc.SaveToStream(ms);
+                    await _fileStorage.WriteFileAsync(destFile, ms.ToArray());
+                    return true;
+                }
+
+                if (!Directory.Exists(targetDir))
+                    Directory.CreateDirectory(targetDir);
+
+                var attempt = 0;
+                while (attempt < maxRetries)
+                {
+                    try
+                    {
+                        attempt++;
+                        var tempFile = Path.Combine(targetDir, $"temp_{Guid.NewGuid()}.pdf");
+                        pdfdoc.SaveToFile(tempFile);
+
+                        if (System.IO.File.Exists(destFile))
+                            System.IO.File.Delete(destFile);
+
+                        System.IO.File.Move(tempFile, destFile);
+                        return true;
+                    }
+                    catch (IOException ioEx) when (attempt < maxRetries)
+                    {
+                        _logger.LogWarning(ioEx, "Retry {Attempt}/{Max} saving PDF to NAS for doc: {DocId}",
+                            attempt, maxRetries, docId);
+                        await Task.Delay(delayMs);
+                    }
+                }
+
+                return false;
+            }
+        }
+        finally
+        {
+            pdfdoc.Close();
+        }
+    }
+
+    // ==================== RECONSTRUCT SIGNED PDF (ported from legacy getPDF_View_old) ====================
+
+    // Force-reloads the currently-saved signed PDF and redraws every already-
+    // applied signature stamp using the exact PFX certificate/password and
+    // historical sign_datetime on record for that row — not whatever
+    // certificate is "active" today, and not DateTime.Now (unlike the live
+    // signing stamp in step 8 above, which IS the sign moment). Ported from
+    // blankController.getPDF_View_old; not wired to any caller yet.
+    // doc_status_id values that mean "not a normal signed document" — returned
+    // (4/5/7), clerical error (8), lacking attachment (9), terminated (13).
+    // Reconstruction redraws signatures from document_signatories/
+    // document_signature_location, which is meaningless (or actively
+    // misleading) for a document in one of these states — GetPdfDigitalOnlyAsync
+    // serves those as a watermarked, not-final copy instead, and this must
+    // not be usable to overwrite that with an unwatermarked redraw.
+    private static readonly HashSet<int> NonReconstructableStatuses = new() { 4, 5, 7, 8, 9, 13 };
+
+    public async Task<ReconstructPdfResult> ReconstructSignedPdfAsync(int docId)
+    {
+        var docStatusId = await _dbService.ExecuteScalarAsync<int?, dynamic>(
+            "SELECT doc_status_id FROM bacpdfsign.dbo.document_attach WHERE doc_id = @DocId",
+            new { DocId = docId },
+            CommandType.Text);
+
+        if (docStatusId == null)
+            return new ReconstructPdfResult { NotFoundMessage = "Document not found" };
+
+        if (NonReconstructableStatuses.Contains(docStatusId.Value))
+            return new ReconstructPdfResult
+            {
+                BadRequestMessage = "This document is returned/cancelled/terminated and cannot be reconstructed."
+            };
+
+        byte[]? pdfBytes;
+        string existingPath;
+        using (_fileStorage.Connect(DigitalSignaturePath))
+        {
+            existingPath = await FindSignedPdfPathAsync(docId.ToString());
+            pdfBytes = await _fileStorage.ReadFileAsync(existingPath);
+        }
+
+        if (pdfBytes == null || pdfBytes.Length == 0)
+            return new ReconstructPdfResult { NotFoundMessage = "Signed PDF not found for this document" };
+
+        Spire.Pdf.License.LicenseProvider.SetLicenseKey("WHYRM/zCtFDRxmwBALCmKY1bBbX9dEFPZjk21hNB10uadQV5COVC24hiA3vsQkj0zSgEzHh4++mY8SpoOo65Pp1jQyrA5Wpq+QByPk0vlSKdOa21CrLuqaJb/MvO9MEyfhtX4qy2qDY9uVOEr+cqGx74ZIy1ohXBoW77YNnbhNgniw5BhBl6JbsAIC8FuimIv23VJm16b790utw1h7RKSN5fA0iyxkYChcaXj1Gw+qMxM7vEIxB/fCoQoE/cgTd+ChHyXpRt9z8rhbknZ3Gt6Iequ9Q4ggXGCdQB/WXKeS6YFPKFDdCA4W0CQWPm4NZG//mqIY41+krPMuZ5KtVSg0gLVLu2W78iKi6Q1pl4QQjC2r8FvtzI00ienDKokJJX4LL6TY0IDNsYl3eNUu4lJQ4p24mE2ea8ps2OTALvs2GxvY2RsMAaAfR0oSMNTqvURhSTw6dyUgv3tCbjtq3Wl4rRRvPXgyS/1B9GxJrQd8HFvGDTOqvRe4abQxmbdN0RsMqemxFA8kPvwZJv7lqoVkKVrKYmEFDC+byPgLhyNOArVQzDpB2cfgAVIib8Dxjl72mQzJ4ef33FdEenOL0INOUAPhBuLF2/uTUQt5bUOWOT1ZX4ynk53zxS6USp6d6KBHDuoYWxfx3g4flDwARicWkvL6x69l90Jpd5ARVUQAug5SfkNQIPxTlobPSbh/LUW7xaQKfhtUVQyhc1mb/ZNgqSnbgbnwbp1JL+DSth1tr5pxpnK5ZTzyY21Rmndf9oU77KLOgbe8MVcNC110LnaqvaMsKaGOHdF1m0cmdCi9ejcgpWyJ1j4y3c0CIstLiaBA1tgthlE25YVrcdkLROEPOlrXMsEeUO5+DYtQl9E9Ete92cYPXaLC/70Fr9XiMKzsZUf/4dHuIcEtP8414ZPWB5Ibjf4BGfsN4hiMTrhYRDD5qS/YaIRkRXLPogzLLV/m1OR63VL5WyuyFQEdxuSM9WtxSw3/cjzRMImXmZ5MKChNHA2HO5HWhe39gXocbCUsIPTvEb84im2ekjwku+3ldHolDkO7cAYPzlDHVapsMXc870e7+1yI/oEPK81bTWDxK5Tzr1GLd1M2CzaC3bySeJ0N6PdsrPY/DRDWaB7hwQNt7nQy/VZzs+cD9iz1pGbiqDANXApX2hqyUFIdxsTWBpB0F1zY3GcdoEfB+07uR+qQpjclNAUNH+BgUU8S/PkQ/QEImY5RWbj1QqdvV3oI9Z2fppFsF5aGoFjgYllzmirgsi6Vl/H+bOO4bT2Sgs+NUdU5aECuX8zrQ3hFW3A0DRPzJnTPTup9R+EOl2ppzBLf5zUWaFKsX/lOvislq+CspeuBU3vHoe7YkG3eBWCEStzuukUUJnAto/YGM6wCIspAhARfL9mFH02CWZsAnO+k+ywkH2/KY+UQvhjPR2uiubdtVD7zPyJEY8r8uN0Yqq1ocK5yR2JZEuryT3lYqnmeIM7Xt4RPJOMSXWOxjwnflN02B11gsfou/eqoAnCRpwtnuD7kYZMb5rp7EVow4Ez7FDUd2Tb+fImNqC2P2Sl2eXhuzqeyeW/nUGNO/usiS5iCHI0A2sc6cJLT8/nZ74IopPcxYXbtlgAAU5BovivzDQzDpbW6SBAhV+ulqnCiSWIxD2NdnAuQ==");
+        Spire.Pdf.License.LicenseProvider.LoadLicense();
+
+        var pdfdoc = new Spire.Pdf.PdfDocument();
+        try
+        {
+            pdfdoc.LoadFromBytes(pdfBytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load PDF for reconstruction, doc {DocId}", docId);
+            return new ReconstructPdfResult { ServerErrorMessage = "Failed to load the existing signed PDF" };
+        }
+
+        var rows = await _dbService.QueryAsync<ReconstructSignatureRow, dynamic>(
+            @"SELECT a.sig_eid AS SigEid, a.sig_user_type AS SigUserType, a.sig_id AS SigId, ISNULL(a.sig_level, 0) AS SigLevel,
+                     b.sign_x AS SignX, b.sign_y AS SignY, b.sign_page AS SignPage,
+                     b.sign_datetime AS SignDatetime, b.sign_passwod AS SignPasswordEncrypted,
+                     b.pfx_id AS PfxId, ISNULL(b.sign_is_alternate_signature, 0) AS SignIsAlternate
+              FROM bacpdfsign.dbo.document_signatories a
+              INNER JOIN bacpdfsign.dbo.document_signature_location b ON a.sig_id = b.sig_id
+              WHERE a.doc_id = @DocId
+              ORDER BY a.sig_order",
+            new { DocId = docId },
+            CommandType.Text);
+
+        foreach (var row in rows)
+        {
+            await StampReconstructedSignatureAsync(pdfdoc, row);
+        }
+
+        // Save back to the exact path the file was already found at — never
+        // a "today"-derived folder. A document signed (and therefore filed)
+        // in a prior year must stay under that year's folder.
+        if (!await SaveSignedPdfToPathAsync(pdfdoc, existingPath, docId.ToString()))
+            return new ReconstructPdfResult { ServerErrorMessage = "Something went wrong while saving the reconstructed file." };
+
+        // Re-read what was just written instead of re-serializing pdfdoc a
+        // second time — SaveSignedPdfToPathAsync already closed it above.
+        byte[]? finalBytes;
+        using (_fileStorage.Connect(DigitalSignaturePath))
+        {
+            finalBytes = await _fileStorage.ReadFileAsync(existingPath);
+        }
+
+        return new ReconstructPdfResult { Success = true, PdfBytes = finalBytes };
+    }
+
+    // Redraws one already-applied signature using the exact PFX cert/password
+    // and historical date on record for it. Failures are logged and skipped
+    // (not thrown) — one bad historical row shouldn't block redrawing the rest.
+    private async Task StampReconstructedSignatureAsync(Spire.Pdf.PdfDocument pdfdoc, ReconstructSignatureRow row)
+    {
+        var pageIndex = row.SignPage - 1;
+        if (pageIndex < 0 || pageIndex >= pdfdoc.Pages.Count)
+        {
+            _logger.LogWarning("Skipping invalid page {Page} while reconstructing sig {SigId}", row.SignPage, row.SigId);
+            return;
+        }
+
+        var eid = row.SigEid.ToString();
+        var userType = row.SigUserType.ToString();
+
+        // Reconstruction must use the exact certificate this row actually
+        // signed with (by pfx_id), not "whichever is active now" like live
+        // signing does — a signatory's active cert can change over time.
+        var pfx = await _dbService.QueryFirstOrDefaultAsync<PfxDetails, dynamic>(
+            @"SELECT a.id AS PfxId, a.pfx_attachement AS PfxAttachment, a.signatures AS Signature,
+                     a.eid AS Eid, a.code AS Code
+              FROM bacpdfsign.dbo.pfx_attachments AS a
+              WHERE a.id = @PfxId",
+            new { PfxId = row.PfxId },
+            CommandType.Text);
+
+        if (pfx == null || pfx.PfxAttachment == null || pfx.PfxAttachment.Length == 0)
+        {
+            _logger.LogWarning("No PFX attachment found for pfx_id {PfxId} while reconstructing sig {SigId}", row.PfxId, row.SigId);
+            return;
+        }
+
+        string password;
+        try
+        {
+            password = string.IsNullOrEmpty(row.SignPasswordEncrypted) ? "" : (SPMS.Rijndael.Decrypt(row.SignPasswordEncrypted) ?? "");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to decrypt stored password while reconstructing sig {SigId}", row.SigId);
+            return;
+        }
+        if (string.IsNullOrEmpty(password))
+        {
+            _logger.LogWarning("No stored password available while reconstructing sig {SigId}", row.SigId);
+            return;
+        }
+
+        var code = pfx.Code ?? eid;
+        var certDir = Path.Combine(_env.ContentRootPath, "Data", "upload",
+            $"temp_folder{eid}", "info", $"signature_folder{code}");
+        if (!Directory.Exists(certDir))
+            Directory.CreateDirectory(certDir);
+
+        var certPath = Path.Combine(certDir, $"cert_{eid}.p12");
+        var sigImagePath = Path.Combine(certDir, $"signature_{eid}.png");
+
+        if (!System.IO.File.Exists(certPath))
+            await System.IO.File.WriteAllBytesAsync(certPath, pfx.PfxAttachment);
+
+        if (!System.IO.File.Exists(sigImagePath) && !string.IsNullOrEmpty(pfx.Signature))
+        {
+            var cleanSig = Regex.Replace(pfx.Signature, @"^[\w/\:.-]+;base64,", string.Empty);
+            await System.IO.File.WriteAllBytesAsync(sigImagePath, Convert.FromBase64String(cleanSig));
+        }
+
+        var imagePath = sigImagePath;
+        if (row.SignIsAlternate != 0)
+        {
+            var isAltAvailable = await GetAlterSpecimen(eid, userType);
+            var altPath = await GetAlternateSignatureImage(eid, userType, isAltAvailable);
+            if (!string.IsNullOrEmpty(altPath))
+                imagePath = altPath;
+        }
+
+        if (!System.IO.File.Exists(imagePath))
+        {
+            _logger.LogWarning("No signature image available while reconstructing sig {SigId}", row.SigId);
+            return;
+        }
+
+        var signFname = await GetSigFname(eid, userType);
+
+        var nameLabel = row.SigLevel switch
+        {
+            3 => "BY AUTHORITY OF THE GOVERNOR \n\r Digitally signed by: \n\r",
+            4 => "FOR \n\r\n\r Digitally signed by: \n\r",
+            _ => "Digitally signed by: \n\r"
+        };
+
+        // The one place reconstruction must diverge from live signing's stamp
+        // (step 8 above): the date label has to show when this signature
+        // actually happened, not DateTime.Now.
+        var datePost = row.SignDatetime.HasValue
+            ? $"\n\r Date: {row.SignDatetime.Value:MMM dd, yyyy}"
+            : "";
+
+        try
+        {
+            var cert = new Spire.Pdf.Security.PdfCertificate(certPath, password);
+            var signature = new Spire.Pdf.Security.PdfSignature(pdfdoc, pdfdoc.Pages[pageIndex], cert, $"Signature_{Guid.NewGuid()}");
+
+            pdfdoc.AllowCreateForm = pdfdoc.Form == null;
+
+            signature.Bounds = new System.Drawing.RectangleF((float)row.SignX, (float)row.SignY, 200, 60);
+            signature.GraphicsMode = Spire.Pdf.Security.GraphicMode.SignImageAndSignDetail;
+            signature.NameLabel = nameLabel;
+            signature.Name = $"{signFname} \n\r";
+            signature.DateLabel = datePost;
+            signature.DocumentPermissions = Spire.Pdf.Security.PdfCertificationFlags.AllowFormFill
+                                          | Spire.Pdf.Security.PdfCertificationFlags.ForbidChanges;
+            signature.SignDetailsFont = new Spire.Pdf.Graphics.PdfFont(Spire.Pdf.Graphics.PdfFontFamily.TimesRoman, 5f);
+            signature.SignNameFont = new Spire.Pdf.Graphics.PdfFont(Spire.Pdf.Graphics.PdfFontFamily.Helvetica, 5f);
+            signature.SignImageLayout = Spire.Pdf.Security.SignImageLayout.Stretch;
+            signature.SignImageSource = Spire.Pdf.Graphics.PdfImage.FromFile(imagePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to stamp reconstructed signature for sig {SigId}", row.SigId);
+        }
+    }
+
+    private class ReconstructSignatureRow
+    {
+        public int SigEid { get; set; }
+        public int SigUserType { get; set; }
+        public int SigId { get; set; }
+        public int SigLevel { get; set; }
+        public double SignX { get; set; }
+        public double SignY { get; set; }
+        public int SignPage { get; set; }
+        public DateTime? SignDatetime { get; set; }
+        public string? SignPasswordEncrypted { get; set; }
+        public string PfxId { get; set; } = "";
+        public int SignIsAlternate { get; set; }
     }
 
     private async Task<string> FindSignedPdfPathAsync(string docId)

@@ -21,6 +21,15 @@ public interface ISigningService
 
     Task<PdfDigitalOnlyResult> GetPdfDigitalOnlyAsync(int formId);
 
+    // Force-reloads the currently-saved signed PDF and redraws every already-
+    // applied signature stamp from document_signatories/document_signature_location
+    // (using each row's own historical sign_datetime and the exact PFX
+    // certificate/password on record for that signature, not whatever is
+    // "active" today), then re-saves it through the same storage routine
+    // SaveSignatureImageAsync uses. Ported from the legacy VotingApp's
+    // getPDF_View_old. No caller wired up yet — added ahead of need.
+    Task<ReconstructPdfResult> ReconstructSignedPdfAsync(int docId);
+
     Task<bool> GetPfxAttachmentsByEidAsync(int eid, int userType);
 
     Task<bool> GetPincodeByEidAsync(int eid, int userType, string pincode);
@@ -84,6 +93,12 @@ public interface ISigningService
     // (document_signature_location etc.) is never orphaned.
     Task<AdminUpdateSignatoriesResult> AdminUpdateSignatoriesAsync(AdminUpdateSignatoriesRequest request);
 
+    // Admin override of a single signatory row's sig_status by sig_id —
+    // works on already-signed rows too (unlike AdminUpdateSignatoriesAsync).
+    // Just flips the status value; does not touch document_signature_location
+    // or re-run any of the notification/routing side effects a real sign does.
+    Task<AdminUpdateSignatoryStatusResult> AdminUpdateSignatoryStatusAsync(AdminUpdateSignatoryStatusRequest request);
+
     // Supporting documents are independent of the edit lock — always allowed.
     Task<AddSupportingFileResult> AddSupportingFileAsync(int docId, int eid, IFormFile file);
 
@@ -118,6 +133,15 @@ public class PdfDigitalOnlyResult
     // Sanitized "{description}.pdf" — caller (controller) builds the
     // Content-Disposition header from this plus its own isDownload param.
     public string? FileName { get; set; }
+}
+
+public class ReconstructPdfResult
+{
+    public bool Success { get; set; }
+    public string? NotFoundMessage { get; set; }
+    public string? BadRequestMessage { get; set; }
+    public string? ServerErrorMessage { get; set; }
+    public byte[]? PdfBytes { get; set; }
 }
 
 public class SaveSignatureResult

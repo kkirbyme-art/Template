@@ -384,6 +384,24 @@ namespace DigitalSignature.Models
         public int SignatoryCount { get; set; }
     }
 
+    // Admin override of one already-signed (or any) signatory row's status —
+    // a direct sig_status write, separate from AdminUpdateSignatoriesRequest
+    // above (which only ever deletes/reinserts pending rows and never
+    // touches a signed one). Does not fabricate a signature stamp/location
+    // row; it only changes the status value on record.
+    public class AdminUpdateSignatoryStatusRequest
+    {
+        public int SigId { get; set; }
+        public int Status { get; set; }
+    }
+
+    public class AdminUpdateSignatoryStatusResult
+    {
+        public bool Success { get; set; }
+        public bool IsServerError { get; set; }
+        public string? Message { get; set; }
+    }
+
     public class DeleteDocumentResult
     {
         public bool Success { get; set; }
