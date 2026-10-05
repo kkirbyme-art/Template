@@ -12,6 +12,29 @@ dist
 dist-ssr
 *.local
 
+# Claude Code personal settings
+.claude/settings.local.json
+
+# Contains live production DB credentials (sa), NAS domain password, and S3/JWT/AES secrets
+DigitalSignature/appsettings.Development.json
+DigitalSignature/appsettings.json
+
+# Build output (includes copies of appsettings with secrets)
+artifacts/
+tsconfig.tsbuildinfo
+.tanstack/tmp/
+
+# User uploads: signing certificates (private keys) and signature images
+DigitalSignature/Data/upload/
+*.p12
+*.pfx
+
+# Local test files
+test_doctype.pdf
+
+# Visual Studio
+.vs/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
